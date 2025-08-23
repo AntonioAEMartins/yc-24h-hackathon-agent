@@ -390,7 +390,7 @@ async function loadPlanResults(containerId: string, logger?: any): Promise<any |
  * This step quickly checks for a previously saved plan file statically
  * without agent calls for maximum speed. If found, skips to test generation.
  */
-const checkSavedPlanStep = createStep({
+export const checkSavedPlanStep = createStep({
     id: "check-saved-plan-step",
     inputSchema: WorkflowInput,
     outputSchema: z.object({
@@ -456,7 +456,7 @@ const checkSavedPlanStep = createStep({
  * This step loads the repository context and creates a focused testing strategy
  * for ONE high priority module only. Results are saved to static file for fast resume.
  */
-const loadContextAndPlanStep = createStep({
+export const loadContextAndPlanStep = createStep({
     id: "load-context-and-plan-step",
     inputSchema: z.object({
         containerId: z.string(),
@@ -973,7 +973,7 @@ Instructions:
  * - Fast and focused on one test file for MVP
  */
 /* COMMENTED OUT FOR MVP VALIDATION - COMPLEX APPROACH
-const generateTestCodeStep = createStep({
+export const generateTestCodeStep = createStep({
     id: "generate-test-code-step",
     inputSchema: z.object({
         containerId: z.string(),
@@ -1265,7 +1265,7 @@ RETURN FORMAT (JSON only):
  * Basic step that generates a simple test file using unitTestAgent with minimal reasoning
  * to validate that the workflow works before implementing complex features.
  */
-const generateTestCodeStep = createStep({
+export const generateTestCodeStep = createStep({
     id: "generate-test-code-step",
     inputSchema: z.object({
         containerId: z.string(),
@@ -1560,7 +1560,7 @@ RETURN FORMAT (JSON only - MUST return accurate counts):
  * 
  * Advanced final step that validates test syntax, executes tests, and retries with error feedback if needed.
  */
-const finalizeStep = createStep({
+export const finalizeStep = createStep({
     id: "finalize-step",
     inputSchema: z.object({
         containerId: z.string(),

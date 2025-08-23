@@ -7,7 +7,7 @@ import { existsSync, writeFileSync, unlinkSync, mkdtempSync } from "fs";
 import path from "path";
 import os from "os";
 
-const testDockerStep = createStep({
+export const testDockerStep = createStep({
     id: "test-docker-step",
     inputSchema: z.object({
         contextData: z.any().optional().describe("Optional context data to pass through"),
@@ -70,7 +70,7 @@ docker inspect -f '{{.Id}}' yc-ubuntu-test`;
     }
 });
 
-const testDockerGithubCloneStep = createStep({
+export const testDockerGithubCloneStep = createStep({
     id: "test-docker-github-clone-step",
     inputSchema: z.object({
         result: z.string().describe("The result of the Docker operation"),
@@ -140,7 +140,7 @@ const testDockerGithubCloneStep = createStep({
     }
 });
 
-const saveContextStep = createStep({
+export const saveContextStep = createStep({
     id: "save-context-step",
     inputSchema: z.object({
         result: z.string().describe("The result of the Docker operation"),

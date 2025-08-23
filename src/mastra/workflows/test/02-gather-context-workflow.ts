@@ -221,7 +221,7 @@ async function callContextAgentForAnalysis<T>(
 }
 
 // Step 1: Comprehensive Repository Analysis
-const analyzeRepositoryStep = createStep({
+export const analyzeRepositoryStep = createStep({
     id: "analyze-repository-step",
     inputSchema: WorkflowInput,
     outputSchema: z.object({
@@ -341,7 +341,7 @@ FAST ANALYSIS - Return JSON immediately:
 });
 
 // Step 2: Deep Codebase Analysis
-const analyzeCodebaseStep = createStep({
+export const analyzeCodebaseStep = createStep({
     id: "analyze-codebase-step",
     inputSchema: WorkflowInput,
     outputSchema: z.object({
@@ -471,7 +471,7 @@ IMMEDIATE JSON RESPONSE:
 });
 
 // Step 3: Build and Deployment Analysis
-const analyzeBuildDeploymentStep = createStep({
+export const analyzeBuildDeploymentStep = createStep({
     id: "analyze-build-deployment-step",
     inputSchema: WorkflowInput,
     outputSchema: z.object({
@@ -609,7 +609,7 @@ INSTANT JSON:
 });
 
 // Step 4: Synthesize Final Context  
-const synthesizeContextStep = createStep({
+export const synthesizeContextStep = createStep({
     id: "synthesize-context-step",
     inputSchema: z.object({
         "analyze-repository-step": z.object({
@@ -777,7 +777,7 @@ Return strictly JSON matching this schema:
 });
 
 // Step 5: Save Context for Unit Testing
-const saveContextStep = createStep({
+export const saveContextStep = createStep({
     id: "save-context-step",
     inputSchema: RepoContext.extend({
         containerId: z.string(),
@@ -968,7 +968,7 @@ const saveContextStep = createStep({
 });
 
 // Final validation and return step
-const validateAndReturnStep = createStep({
+export const validateAndReturnStep = createStep({
     id: "validate-and-return-step",
     inputSchema: z.object({
         containerId: z.string(),
@@ -1056,7 +1056,7 @@ const validateAndReturnStep = createStep({
 });
 
 // Workflow start logging step
-const workflowStartStep = createStep({
+export const workflowStartStep = createStep({
     id: "workflow-start-step", 
     inputSchema: WorkflowInput,
     outputSchema: WorkflowInput,

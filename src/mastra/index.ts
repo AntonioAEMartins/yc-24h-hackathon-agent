@@ -14,10 +14,11 @@ import { testValidationAgent } from './agents/test-validation-agent';
 import { testDockerWorkflow } from './workflows/test/01-docker-test-workflow';
 import { gatherContextWorkflow } from './workflows/test/02-gather-context-workflow';
 import { generateUnitTestsWorkflow } from './workflows/test/03-generate-unit-tests-workflow';
-import { unitTestWorkflow } from './workflows/unit-test-workflow';
+// import { unitTestWorkflow } from './workflows/unit-test-workflow';
+import { fullPipelineWorkflow } from './workflows/full-pipeline-workflow';
 
 export const mastra = new Mastra({
-  workflows: { testDockerWorkflow, gatherContextWorkflow, generateUnitTestsWorkflow, unitTestWorkflow },
+  workflows: { testDockerWorkflow, gatherContextWorkflow, generateUnitTestsWorkflow, fullPipelineWorkflow },
   agents: { 
     dockerAgent, 
     contextAgent, 
