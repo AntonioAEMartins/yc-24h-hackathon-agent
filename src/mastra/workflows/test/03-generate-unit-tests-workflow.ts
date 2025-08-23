@@ -415,6 +415,7 @@ export const checkSavedPlanStep = createStep({
             containerId,
             title: "Check saved plan",
             subtitle: "Looking for cached plan results",
+            projectId: inputData.projectId,
         });
         
         logger?.info("⚡ Step 0/3: Fast check for saved plan", {
@@ -448,6 +449,7 @@ export const checkSavedPlanStep = createStep({
                 title: "Saved plan found",
                 subtitle: "Skipping planning",
                 toolCallCount: cliToolMetrics.callCount,
+                projectId: inputData.projectId,
             });
 
             return {
@@ -473,6 +475,7 @@ export const checkSavedPlanStep = createStep({
                 title: "No saved plan",
                 subtitle: "Proceeding to plan",
                 toolCallCount: cliToolMetrics.callCount,
+                projectId: inputData.projectId,
             });
 
             return {
@@ -529,6 +532,7 @@ export const loadContextAndPlanStep = createStep({
                 title: "Load context & plan completed",
                 subtitle: "Skipped - using saved plan",
                 toolCallCount: cliToolMetrics.callCount,
+                projectId: inputData.projectId,
             });
             
             return {
@@ -546,6 +550,7 @@ export const loadContextAndPlanStep = createStep({
             containerId,
             title: "Load context & plan",
             subtitle: "Creating MVP plan for tests",
+            projectId: inputData.projectId,
         });
 
         const logger = ALERTS_ONLY ? null : mastra?.getLogger();
@@ -707,6 +712,7 @@ RETURN FORMAT (JSON only - comprehensive analysis):
                 title: "Load context & plan completed",
                 subtitle: `MVP plan created for ${highPriorityModules[0].modulePath}`,
                 toolCallCount: cliToolMetrics.callCount,
+                projectId: inputData.projectId,
             });
 
             return {
@@ -778,6 +784,7 @@ RETURN FORMAT (JSON only - comprehensive analysis):
                 subtitle: error instanceof Error ? error.message : 'Unknown error',
                 level: 'error',
                 toolCallCount: cliToolMetrics.callCount,
+                projectId: inputData.projectId,
             });
 
             // Send completed status for fallback plan
@@ -790,6 +797,7 @@ RETURN FORMAT (JSON only - comprehensive analysis):
                 subtitle: "Using fallback MVP plan",
                 level: 'warning',
                 toolCallCount: cliToolMetrics.callCount,
+                projectId: inputData.projectId,
             });
 
             return {
@@ -814,9 +822,10 @@ async function retryTestGeneration(
     errorFeedback: string | undefined,
     mastra: any,
     projectId: string,
+    contextPath: string | undefined,
     runId?: string,
     logger?: any
-): Promise<z.infer<typeof UnitTestResult> & { projectId: string }> {
+): Promise<z.infer<typeof UnitTestResult> & { projectId: string; containerId: string; contextPath?: string }> {
     if (testSpecs.length === 0) {
         throw new Error("Cannot retry test generation without test specifications");
     }
@@ -971,6 +980,8 @@ RETURN FORMAT (JSON only - MUST return accurate counts after corrections):
                 "Review error feedback and consider manual intervention if retries continue to fail"
             ],
             projectId: projectId,
+            containerId,
+            contextPath,
         };
 
     } catch (error) {
@@ -1020,6 +1031,8 @@ RETURN FORMAT (JSON only - MUST return accurate counts after corrections):
                 "Check Docker container and dependency availability"
             ],
             projectId: projectId,
+            containerId,
+            contextPath,
         };
     }
 }
@@ -1076,6 +1089,7 @@ export const generateTestCodeStep = createStep({
     }),
     outputSchema: z.object({
         containerId: z.string(),
+        contextPath: z.string().optional(),
         testGeneration: TestGenerationResult,
         repoAnalysis: RepoTestAnalysis,
         testSpecs: z.array(TestSpecification),
@@ -1296,6 +1310,7 @@ RETURN FORMAT (JSON only - MUST return accurate counts):
                 title: "Test generation completed",
                 subtitle: result.testFile,
                 toolCallCount: cliToolMetrics.callCount,
+                projectId: inputData.projectId,
             });
 
             // Create simple test generation result
@@ -1318,6 +1333,7 @@ RETURN FORMAT (JSON only - MUST return accurate counts):
 
             return {
                 containerId,
+                contextPath: inputData.contextPath,
                 testGeneration,
                 repoAnalysis,
                 testSpecs: [testSpec],
@@ -1340,6 +1356,7 @@ RETURN FORMAT (JSON only - MUST return accurate counts):
                 subtitle: error instanceof Error ? error.message : 'Unknown error',
                 level: 'error',
                 toolCallCount: cliToolMetrics.callCount,
+                projectId: inputData.projectId,
             });
 
             // Return failed result
@@ -1371,6 +1388,7 @@ RETURN FORMAT (JSON only - MUST return accurate counts):
 
             return {
                 containerId,
+                contextPath: inputData.contextPath,
                 testGeneration,
                 repoAnalysis,
                 testSpecs: [testSpec],
@@ -1381,14 +1399,47 @@ RETURN FORMAT (JSON only - MUST return accurate counts):
 });
 
 /**
+ * Helper function to ensure completion notification is always sent
+ */
+async function ensureCompletionNotification(
+    stepId: string,
+    status: "completed" | "failed",
+    runId: string | undefined,
+    containerId: string,
+    projectId: string,
+    success: boolean,
+    subtitle?: string,
+    error?: string
+): Promise<void> {
+    try {
+        await notifyStepStatus({
+            stepId,
+            status,
+            runId,
+            containerId,
+            title: status === "completed" ? "Finalize completed" : "Finalize failed",
+            subtitle: subtitle || (success ? "Success" : "Completed with warnings"),
+            level: error ? 'error' : (success ? 'success' : 'warning'),
+            toolCallCount: cliToolMetrics.callCount,
+            projectId,
+        });
+    } catch (notificationError) {
+        // Log the notification failure but don't throw to avoid masking the original result
+        console.warn('⚠️ Failed to send completion notification:', notificationError);
+    }
+}
+
+/**
  * Step 3: Finalize with Syntax Validation and Retry Logic (Enhanced MVP)
  * 
  * Advanced final step that validates test syntax, executes tests, and retries with error feedback if needed.
+ * Improved with comprehensive error handling and guaranteed completion notifications.
  */
 export const finalizeStep = createStep({
     id: "finalize-step",
     inputSchema: z.object({
         containerId: z.string(),
+        contextPath: z.string().optional(),
         testGeneration: TestGenerationResult,
         repoAnalysis: RepoTestAnalysis,
         testSpecs: z.array(TestSpecification),
@@ -1398,59 +1449,91 @@ export const finalizeStep = createStep({
     }),
     outputSchema: UnitTestResult.extend({
         projectId: z.string(),
+        containerId: z.string(),
+        contextPath: z.string().optional(),
     }),
     execute: async ({ inputData, mastra, runId }) => {
         const { testGeneration, containerId, repoAnalysis, testSpecs, retryCount = 0, lastError } = inputData;
         const logger = mastra?.getLogger();
         const maxRetries = 2;
-        await notifyStepStatus({
-            stepId: "finalize-step",
-            status: "starting",
-            runId,
-            containerId,
-            title: "Finalize",
-            subtitle: "Validation and recommendations",
-        });
         
-        logger?.info("🔍 Step 3/3: Enhanced finalization with syntax validation and retry logic", {
-            step: "3/3",
-            stepName: "Enhanced Finalize with Validation",
-            testFileGenerated: testGeneration.testFiles.length,
-            retryCount,
-            maxRetries,
-            hasLastError: !!lastError,
-            type: "WORKFLOW_STEP",
-            runId: runId,
-        });
-
-        // If we have failed files, check if we should retry
-        if (testGeneration.summary.failedFiles > 0 && retryCount < maxRetries && repoAnalysis && testSpecs) {
-            logger?.warn("⚠️ Test generation had failures, initiating retry with error feedback", {
-                step: "3/3",
-                failedFiles: testGeneration.summary.failedFiles,
-                retryCount: retryCount + 1,
-                lastError: lastError?.substring(0, 200),
-                type: "WORKFLOW_STEP",
-                runId: runId,
+        // Track execution state for proper cleanup
+        let executionResult: any = null;
+        let executionError: Error | null = null;
+        let isRetryPath = false;
+        try {
+            // Send starting notification
+            await notifyStepStatus({
+                stepId: "finalize-step",
+                status: "starting",
+                runId,
+                containerId,
+                title: "Finalize",
+                subtitle: "Validation and recommendations",
+                projectId: inputData.projectId,
             });
-
-            // Prepare retry with error feedback
-            return await retryTestGeneration(containerId, repoAnalysis, testSpecs, retryCount + 1, lastError, mastra, inputData.projectId, runId, logger);
-        }
-
-        // Phase 1: Syntax and Execution Validation
-        if (testGeneration.summary.successfulFiles > 0) {
-            const testFile = testGeneration.testFiles[0];
             
-            logger?.info("✅ Phase 1: Syntax and execution validation", {
+            logger?.info("🔍 Step 3/3: Enhanced finalization with syntax validation and retry logic", {
                 step: "3/3",
-                phase: "validation",
-                testFile: testFile?.testFile,
+                stepName: "Enhanced Finalize with Validation",
+                testFileGenerated: testGeneration.testFiles.length,
+                retryCount,
+                maxRetries,
+                hasLastError: !!lastError,
                 type: "WORKFLOW_STEP",
                 runId: runId,
             });
 
-            const validationPrompt = `CRITICAL: Validate test file syntax and execution using docker_exec with containerId='${containerId}'.
+            // Check if we should retry due to previous failures
+            if (testGeneration.summary.failedFiles > 0 && retryCount < maxRetries && repoAnalysis && testSpecs) {
+                logger?.warn("⚠️ Test generation had failures, initiating retry with error feedback", {
+                    step: "3/3",
+                    failedFiles: testGeneration.summary.failedFiles,
+                    retryCount: retryCount + 1,
+                    lastError: lastError?.substring(0, 200),
+                    type: "WORKFLOW_STEP",
+                    runId: runId,
+                });
+
+                isRetryPath = true;
+                
+                // Execute retry with error feedback - store result, don't return yet
+                executionResult = await retryTestGeneration(
+                    containerId,
+                    repoAnalysis,
+                    testSpecs,
+                    retryCount + 1,
+                    lastError,
+                    mastra,
+                    inputData.projectId,
+                    inputData.contextPath,
+                    runId,
+                    logger
+                );
+
+                // Don't return here - let finally block handle notification
+                return executionResult;
+            }
+
+            // Main execution path: Create a copy to avoid mutating the input
+            const processedTestGeneration = { 
+                ...testGeneration,
+                quality: { ...testGeneration.quality }
+            };
+
+            // Phase 1: Syntax and Execution Validation
+            if (processedTestGeneration.summary.successfulFiles > 0) {
+                const testFile = processedTestGeneration.testFiles[0];
+                
+                logger?.info("✅ Phase 1: Syntax and execution validation", {
+                    step: "3/3",
+                    phase: "validation",
+                    testFile: testFile?.testFile,
+                    type: "WORKFLOW_STEP",
+                    runId: runId,
+                });
+
+                const validationPrompt = `CRITICAL: Validate test file syntax and execution using docker_exec with containerId='${containerId}'.
 
 TASK: Comprehensive test validation and execution check.
 
@@ -1493,138 +1576,229 @@ RETURN VALIDATION RESULTS (JSON only):
   "recommendations": ["[SPECIFIC_FIX_RECOMMENDATIONS]"]
 }`;
 
-            try {
-                const validationResult = await callAgent("unitTestAgent", validationPrompt, z.object({
-                    syntaxValid: z.boolean(),
-                    executionSuccessful: z.boolean(),
-                    errorDetails: z.string().optional(),
-                    needsRetry: z.boolean(),
-                    recommendations: z.array(z.string()),
-                }), 300, runId, logger);
+                try {
+                    const validationResult = await callAgent("unitTestAgent", validationPrompt, z.object({
+                        syntaxValid: z.boolean(),
+                        executionSuccessful: z.boolean(),
+                        errorDetails: z.string().optional(),
+                        needsRetry: z.boolean(),
+                        recommendations: z.array(z.string()),
+                    }), 300, runId, logger);
 
-                logger?.info("📊 Validation results received", {
-                    syntaxValid: validationResult.syntaxValid,
-                    executionSuccessful: validationResult.executionSuccessful,
-                    hasErrors: !!validationResult.errorDetails,
-                    needsRetry: validationResult.needsRetry,
-                    type: "WORKFLOW_STEP",
-                    runId: runId,
-                });
-
-                // If validation failed and we can retry, do so
-                if (validationResult.needsRetry && retryCount < maxRetries && validationResult.errorDetails && repoAnalysis && testSpecs) {
-                    logger?.warn("🔄 Validation failed, initiating retry with detailed error feedback", {
-                        step: "3/3",
-                        retryCount: retryCount + 1,
-                        errorDetails: validationResult.errorDetails.substring(0, 200),
+                    logger?.info("📊 Validation results received", {
+                        syntaxValid: validationResult.syntaxValid,
+                        executionSuccessful: validationResult.executionSuccessful,
+                        hasErrors: !!validationResult.errorDetails,
+                        needsRetry: validationResult.needsRetry,
                         type: "WORKFLOW_STEP",
                         runId: runId,
                     });
 
-                    return await retryTestGeneration(containerId, repoAnalysis, testSpecs, retryCount + 1, validationResult.errorDetails, mastra, inputData.projectId, runId, logger);
+                    // If validation failed and we can retry, trigger retry path instead of early return
+                    if (validationResult.needsRetry && retryCount < maxRetries && validationResult.errorDetails && repoAnalysis && testSpecs) {
+                        logger?.warn("🔄 Validation failed, initiating retry with detailed error feedback", {
+                            step: "3/3",
+                            retryCount: retryCount + 1,
+                            errorDetails: validationResult.errorDetails.substring(0, 200),
+                            type: "WORKFLOW_STEP",
+                            runId: runId,
+                        });
+
+                        isRetryPath = true;
+                        executionResult = await retryTestGeneration(
+                            containerId, 
+                            repoAnalysis, 
+                            testSpecs, 
+                            retryCount + 1, 
+                            validationResult.errorDetails, 
+                            mastra, 
+                            inputData.projectId, 
+                            inputData.contextPath, 
+                            runId, 
+                            logger
+                        );
+                        
+                        // Don't return here - let finally block handle notification
+                        return executionResult;
+                    }
+
+                    // Update test generation quality based on validation
+                    processedTestGeneration.quality.syntaxValid = validationResult.syntaxValid;
+                    processedTestGeneration.quality.followsBestPractices = validationResult.syntaxValid && validationResult.executionSuccessful;
+                    processedTestGeneration.quality.coverageScore = validationResult.executionSuccessful ? 85 : 50;
+
+                } catch (validationError) {
+                    logger?.warn("⚠️ Validation step failed, proceeding with basic assessment", {
+                        step: "3/3",
+                        error: validationError instanceof Error ? validationError.message : 'Unknown error',
+                        type: "WORKFLOW_STEP",
+                        runId: runId,
+                    });
+                    // Continue with original test generation quality scores
                 }
+            }
 
-                // Update test generation quality based on validation
-                testGeneration.quality.syntaxValid = validationResult.syntaxValid;
-                testGeneration.quality.followsBestPractices = validationResult.syntaxValid && validationResult.executionSuccessful;
-                testGeneration.quality.coverageScore = validationResult.executionSuccessful ? 85 : 50;
+            // Phase 2: Generate Final Recommendations and Result
+            const recommendations = generateRecommendations(processedTestGeneration, retryCount);
+            const result = generateResultMessage(processedTestGeneration, retryCount);
 
-            } catch (validationError) {
-                logger?.warn("⚠️ Validation step failed, proceeding with basic assessment", {
-                    step: "3/3",
-                    error: validationError instanceof Error ? validationError.message : 'Unknown error',
-                    type: "WORKFLOW_STEP",
+            logger?.info("🏁 Step 3/3: Enhanced MVP test generation workflow completed", {
+                step: "3/3",
+                success: processedTestGeneration.summary.successfulFiles > 0,
+                syntaxValid: processedTestGeneration.quality.syntaxValid,
+                testFile: processedTestGeneration.testFiles[0]?.testFile || 'none',
+                functionsCount: processedTestGeneration.summary.totalFunctions,
+                testCasesCount: processedTestGeneration.summary.totalTestCases,
+                coverageScore: processedTestGeneration.quality.coverageScore,
+                toolCallCount: cliToolMetrics.callCount,
+                retryCount,
+                type: "WORKFLOW_STEP",
+                runId: runId,
+            });
+
+            executionResult = {
+                result,
+                success: processedTestGeneration.summary.successfulFiles > 0,
+                toolCallCount: cliToolMetrics.callCount,
+                testGeneration: processedTestGeneration,
+                recommendations,
+                projectId: inputData.projectId,
+                containerId,
+                contextPath: inputData.contextPath,
+            };
+
+            return executionResult;
+            
+        } catch (error) {
+            executionError = error instanceof Error ? error : new Error('Unknown error in finalize step');
+            
+            logger?.error("❌ Step 3/3: Finalize step failed with exception", {
+                step: "3/3",
+                error: executionError.message,
+                stack: executionError.stack?.substring(0, 500),
+                type: "WORKFLOW_STEP",
+                runId: runId,
+            });
+
+            // Create fallback result for exception case
+            executionResult = {
+                result: `❌ Finalize step failed with error: ${executionError.message}`,
+                success: false,
+                toolCallCount: cliToolMetrics.callCount,
+                testGeneration,
+                recommendations: [
+                    `❌ Finalize step encountered an exception: ${executionError.message}`,
+                    "Review error logs and retry the workflow",
+                    "Check Docker container connectivity and agent availability",
+                    "Consider manual intervention if the error persists"
+                ],
+                projectId: inputData.projectId,
+                containerId,
+                contextPath: inputData.contextPath,
+            };
+
+            throw executionError; // Re-throw to trigger finally block
+            
+        } finally {
+            // GUARANTEED completion notification - this will ALWAYS execute
+            try {
+                const finalSuccess = executionResult?.success ?? false;
+                const finalSubtitle = isRetryPath 
+                    ? (finalSuccess ? "Retry succeeded" : "Retry failed")
+                    : (finalSuccess ? "Success" : "Completed with warnings");
+                
+                await ensureCompletionNotification(
+                    "finalize-step",
+                    executionError ? "failed" : "completed",
+                    runId,
+                    containerId,
+                    inputData.projectId,
+                    finalSuccess,
+                    finalSubtitle,
+                    executionError?.message
+                );
+                
+                logger?.info("📤 Finalize step completion notification sent", {
+                    success: finalSuccess,
+                    hasError: !!executionError,
+                    isRetryPath,
+                    type: "NOTIFICATION",
                     runId: runId,
                 });
+                
+            } catch (finalNotificationError) {
+                // This should never happen due to the error handling in ensureCompletionNotification,
+                // but we log it just in case
+                console.error('🚨 Critical: Failed to send completion notification in finally block:', finalNotificationError);
             }
         }
-
-        // Phase 2: Generate Final Recommendations
-        const recommendations = [];
-        
-        if (testGeneration.summary.successfulFiles > 0 && testGeneration.quality.syntaxValid) {
-            recommendations.push(
-                `✅ Run the validated test: npm test ${testGeneration.testFiles[0]?.testFile || ''}`,
-                "Test file has been syntax-validated and is ready for execution",
-                "Consider expanding to other high-priority modules",
-                "Set up test automation in CI/CD pipeline",
-                "Monitor test coverage and add additional test cases as needed"
-            );
-        } else if (testGeneration.summary.successfulFiles > 0) {
-            recommendations.push(
-                `⚠️ Test file created but may have syntax issues: ${testGeneration.testFiles[0]?.testFile || ''}`,
-                "Review and fix any syntax errors before execution",
-                "Check import statements and dependency mocking",
-                "Verify vitest configuration is correct"
-            );
-        } else {
-            recommendations.push(
-                "❌ Test generation failed after retry attempts",
-                "Review error logs for systematic issues",
-                "Check source file accessibility and complexity",
-                "Consider manual test creation as backup",
-                "Verify Docker container has necessary dependencies"
-            );
-        }
-
-        // Add retry-specific recommendations
-        if (retryCount > 0) {
-            recommendations.push(
-                `📊 Completed ${retryCount} retry attempt(s) with error feedback`,
-                "Review the progression of fixes applied during retries",
-                "Consider the error patterns for future test generation improvements"
-            );
-        }
-
-        // Add MVP-specific recommendations
-        recommendations.push(
-            "🎯 Enhanced MVP completed with validation - expand to other modules when ready",
-            "📈 Review generated test quality and validation results",
-            "📝 Document testing approach and validation patterns for team consistency"
-        );
-
-        const result = testGeneration.summary.successfulFiles > 0
-            ? testGeneration.quality.syntaxValid 
-                ? `✅ Enhanced MVP test generation successful with validation: ${testGeneration.testFiles[0]?.testFile || 'test file'} created and validated`
-                : `⚠️ MVP test generation completed with syntax warnings: ${testGeneration.testFiles[0]?.testFile || 'test file'} created but needs review`
-            : `❌ Enhanced MVP test generation failed after ${retryCount} retry attempts - check logs for details`;
-
-        logger?.info("🏁 Step 3/3: Enhanced MVP test generation workflow completed", {
-            step: "3/3",
-            success: testGeneration.summary.successfulFiles > 0,
-            syntaxValid: testGeneration.quality.syntaxValid,
-            testFile: testGeneration.testFiles[0]?.testFile || 'none',
-            functionsCount: testGeneration.summary.totalFunctions,
-            testCasesCount: testGeneration.summary.totalTestCases,
-            coverageScore: testGeneration.quality.coverageScore,
-            toolCallCount: cliToolMetrics.callCount,
-            retryCount,
-            type: "WORKFLOW_STEP",
-            runId: runId,
-        });
-
-        const output = {
-            result,
-            success: testGeneration.summary.successfulFiles > 0,
-            toolCallCount: cliToolMetrics.callCount,
-            testGeneration,
-            recommendations,
-            projectId: inputData.projectId,
-        };
-
-        await notifyStepStatus({
-            stepId: "finalize-step",
-            status: "completed",
-            runId,
-            containerId,
-            title: "Finalize completed",
-            subtitle: output.success ? "Success" : "Completed with warnings",
-            toolCallCount: cliToolMetrics.callCount,
-        });
-
-        return output;
     },
 });
+
+/**
+ * Generate recommendations based on test generation results
+ */
+function generateRecommendations(testGeneration: z.infer<typeof TestGenerationResult>, retryCount: number): string[] {
+    const recommendations = [];
+    
+    if (testGeneration.summary.successfulFiles > 0 && testGeneration.quality.syntaxValid) {
+        recommendations.push(
+            `✅ Run the validated test: npm test ${testGeneration.testFiles[0]?.testFile || ''}`,
+            "Test file has been syntax-validated and is ready for execution",
+            "Consider expanding to other high-priority modules",
+            "Set up test automation in CI/CD pipeline",
+            "Monitor test coverage and add additional test cases as needed"
+        );
+    } else if (testGeneration.summary.successfulFiles > 0) {
+        recommendations.push(
+            `⚠️ Test file created but may have syntax issues: ${testGeneration.testFiles[0]?.testFile || ''}`,
+            "Review and fix any syntax errors before execution",
+            "Check import statements and dependency mocking",
+            "Verify vitest configuration is correct"
+        );
+    } else {
+        recommendations.push(
+            "❌ Test generation failed after retry attempts",
+            "Review error logs for systematic issues",
+            "Check source file accessibility and complexity",
+            "Consider manual test creation as backup",
+            "Verify Docker container has necessary dependencies"
+        );
+    }
+
+    // Add retry-specific recommendations
+    if (retryCount > 0) {
+        recommendations.push(
+            `📊 Completed ${retryCount} retry attempt(s) with error feedback`,
+            "Review the progression of fixes applied during retries",
+            "Consider the error patterns for future test generation improvements"
+        );
+    }
+
+    // Add MVP-specific recommendations
+    recommendations.push(
+        "🎯 Enhanced MVP completed with validation - expand to other modules when ready",
+        "📈 Review generated test quality and validation results",
+        "📝 Document testing approach and validation patterns for team consistency"
+    );
+
+    return recommendations;
+}
+
+/**
+ * Generate result message based on test generation results
+ */
+function generateResultMessage(testGeneration: z.infer<typeof TestGenerationResult>, retryCount: number): string {
+    if (testGeneration.summary.successfulFiles > 0) {
+        if (testGeneration.quality.syntaxValid) {
+            return `✅ Enhanced MVP test generation successful with validation: ${testGeneration.testFiles[0]?.testFile || 'test file'} created and validated`;
+        } else {
+            return `⚠️ MVP test generation completed with syntax warnings: ${testGeneration.testFiles[0]?.testFile || 'test file'} created but needs review`;
+        }
+    } else {
+        return `❌ Enhanced MVP test generation failed after ${retryCount} retry attempts - check logs for details`;
+    }
+}
 
 // ============================================================================
 // WORKFLOW DEFINITION

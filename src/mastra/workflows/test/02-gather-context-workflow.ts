@@ -255,6 +255,61 @@ async function callContextAgentForAnalysis<T>(
     }
 }
 
+// Retry wrapper that sends 'in_progress' alerts on intermediate failures and only marks the step
+// as 'failed' if all attempts are exhausted. On success, the caller should still send 'completed'.
+async function withRetryAndAlerts<T>(options: {
+    stepId: string;
+    containerId: string;
+    runId?: string;
+    titleOnRetry?: string;
+    maxAttempts?: number;
+    logger?: any;
+    attempt: () => Promise<T>;
+}): Promise<T> {
+    const { stepId, containerId, runId, titleOnRetry, maxAttempts = 3, logger, attempt } = options;
+    let lastError: unknown = undefined;
+    for (let attemptIndex = 1; attemptIndex <= maxAttempts; attemptIndex++) {
+        try {
+            const result = await attempt();
+            if (attemptIndex > 1) {
+                logger?.info("🔁 Step succeeded after retry", {
+                    stepId,
+                    attempt: attemptIndex,
+                    type: "RETRY_SUCCESS",
+                    runId: runId,
+                });
+            }
+            return result;
+        } catch (error) {
+            lastError = error;
+            logger?.warn("⚠️ Attempt failed", {
+                stepId,
+                attempt: attemptIndex,
+                error: error instanceof Error ? error.message : 'Unknown error',
+                type: "RETRY_WARN",
+                runId: runId,
+            });
+            if (attemptIndex < maxAttempts) {
+                await notifyStepStatus({
+                    stepId,
+                    status: "in_progress",
+                    runId,
+                    containerId,
+                    title: titleOnRetry || "Retrying after error",
+                    subtitle: error instanceof Error ? error.message : 'Unknown error',
+                    level: 'warning',
+                    toolCallCount: cliToolMetrics.callCount,
+                    metadata: { attempt: attemptIndex, maxAttempts },
+                });
+                continue;
+            }
+            throw error instanceof Error ? error : new Error('Unknown error');
+        }
+    }
+    // Unreachable; satisfies TypeScript
+    throw lastError instanceof Error ? lastError : new Error('Unknown error');
+}
+
 // Step 1: Comprehensive Repository Analysis
 export const analyzeRepositoryStep = createStep({
     id: "analyze-repository-step",
@@ -325,7 +380,15 @@ FAST ANALYSIS - Return JSON immediately:
                 runId: runId,
             });
 
-            const result = await callContextAgentForAnalysis(prompt, RepositoryStructure, 8, runId, logger);
+            const result = await withRetryAndAlerts({
+                stepId: "analyze-repository-step",
+                containerId,
+                runId,
+                logger,
+                maxAttempts: 3,
+                titleOnRetry: "Analyze repository retry",
+                attempt: () => callContextAgentForAnalysis(prompt, RepositoryStructure, 8, runId, logger),
+            });
             
             logger?.info("✅ Repository scan completed quickly", {
                 step: "1/6",
@@ -482,7 +545,15 @@ IMMEDIATE JSON RESPONSE:
                 runId: runId,
             });
 
-            const result = await callContextAgentForAnalysis(prompt, CodebaseAnalysis, 6, runId, logger);
+            const result = await withRetryAndAlerts({
+                stepId: "analyze-codebase-step",
+                containerId,
+                runId,
+                logger,
+                maxAttempts: 3,
+                titleOnRetry: "Analyze codebase retry",
+                attempt: () => callContextAgentForAnalysis(prompt, CodebaseAnalysis, 6, runId, logger),
+            });
             
             logger?.info("✅ Codebase scan completed efficiently", {
                 step: "2/6",
@@ -648,7 +719,15 @@ INSTANT JSON:
                 runId: runId,
             });
 
-            const result = await callContextAgentForAnalysis(prompt, BuildAndDeployment, 4, runId, logger);
+            const result = await withRetryAndAlerts({
+                stepId: "analyze-build-deployment-step",
+                containerId,
+                runId,
+                logger,
+                maxAttempts: 3,
+                titleOnRetry: "Analyze build & deployment retry",
+                attempt: () => callContextAgentForAnalysis(prompt, BuildAndDeployment, 4, runId, logger),
+            });
             
             logger?.info("✅ Build system scan completed rapidly", {
                 step: "3/6",

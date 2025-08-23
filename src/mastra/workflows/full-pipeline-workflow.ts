@@ -1,8 +1,9 @@
-import { createWorkflow } from "@mastra/core";
+import { createWorkflow, createStep } from "@mastra/core";
 import z from "zod";
 import { testDockerStep, testDockerGithubCloneStep, postProjectDescriptionStep, postProjectStackStep, saveContextStep as dockerSaveContextStep } from "./test/01-docker-test-workflow";
 import { workflowStartStep as gatherStartStep, analyzeRepositoryStep, analyzeCodebaseStep, analyzeBuildDeploymentStep, synthesizeContextStep, saveContextStep as gatherSaveContextStep, validateAndReturnStep as gatherValidateAndReturnStep } from "./test/02-gather-context-workflow";
 import { checkSavedPlanStep, loadContextAndPlanStep, generateTestCodeStep, finalizeStep } from "./test/03-generate-unit-tests-workflow";
+import { prepareCommitAndPushStep, createPullRequestStep, postPrUrlStep } from "./test/04-github-pr-workflow";
  
 
 // Input for the pipeline (optional context to seed into the container)
@@ -18,8 +19,9 @@ const PipelineOutput = z.object({
     success: z.boolean(),
     toolCallCount: z.number(),
     containerId: z.string(),
-    contextPath: z.string(),
+    contextPath: z.string().optional(),
     projectId: z.string(),
+    prUrl: z.string(),
 });
 
 export const fullPipelineWorkflow = createWorkflow({
@@ -39,7 +41,27 @@ export const fullPipelineWorkflow = createWorkflow({
 .then(checkSavedPlanStep as any)
 .then(loadContextAndPlanStep)
 .then(generateTestCodeStep)
-.then(finalizeStep)
+.then(finalizeStep as any)
+// 04 - GitHub PR steps
+.then(prepareCommitAndPushStep as any)
+.then(createPullRequestStep as any)
+.then(postPrUrlStep as any)
+.then(createStep({
+    id: "full-pipeline-output-normalizer",
+    inputSchema: z.any(),
+    outputSchema: PipelineOutput,
+    execute: async ({ inputData }) => {
+        return {
+            result: inputData?.result || "Pipeline completed",
+            success: inputData?.success ?? true,
+            toolCallCount: inputData?.toolCallCount ?? 0,
+            containerId: inputData?.containerId || "",
+            contextPath: inputData?.contextPath,
+            projectId: inputData?.projectId || "",
+            prUrl: inputData?.prUrl || "",
+        };
+    },
+}))
 .commit();
 
 
