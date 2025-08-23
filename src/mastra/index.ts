@@ -4,12 +4,31 @@ import { PinoLogger } from '@mastra/loggers';
 import { LibSQLStore } from '@mastra/libsql';
 import { dockerAgent } from './agents/docker-agent';
 import { contextAgent } from './agents/context-agent';
+import { unitTestAgent } from './agents/unit-test-agent';
+import { testAnalysisAgent } from './agents/test-analysis-agent';
+import { testSpecificationAgent } from './agents/test-specification-agent';
+import { testGenerationAgent } from './agents/test-generation-agent';
+import { testValidationAgent } from './agents/test-validation-agent';
+import { testManagerAgent } from './agents/test-manager-agent';
+import { testCoderAgent } from './agents/test-coder-agent';
 import { testDockerWorkflow } from './workflows/test/01-docker-test-workflow';
 import { gatherContextWorkflow } from './workflows/test/02-gather-context-workflow';
+import { generateUnitTestsWorkflow } from './workflows/test/03-generate-unit-tests-workflow';
+import { unitTestWorkflow } from './workflows/unit-test-workflow';
 
 export const mastra = new Mastra({
-  workflows: { testDockerWorkflow, gatherContextWorkflow },
-  agents: { dockerAgent, contextAgent },
+  workflows: { testDockerWorkflow, gatherContextWorkflow, generateUnitTestsWorkflow, unitTestWorkflow },
+  agents: { 
+    dockerAgent, 
+    contextAgent, 
+    unitTestAgent,
+    testAnalysisAgent,
+    testSpecificationAgent, 
+    testGenerationAgent,
+    testValidationAgent,
+    testManagerAgent,
+    testCoderAgent
+  },
   storage: new LibSQLStore({
     // stores telemetry, evals, ... into memory storage, if it needs to persist, change to file:../mastra.db
     url: ":memory:",
