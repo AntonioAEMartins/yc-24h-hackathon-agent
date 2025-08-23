@@ -21,6 +21,10 @@ const WorkflowInput = z.object({
     containerId: z.string().describe("Docker container ID where the repository is mounted"),
     contextPath: z.string().optional().default("/app/agent.context.json").describe("Path to the context file"),
     projectId: z.string().describe("Project ID associated with this workflow run"),
+    // Optional targeting to allow per-file workflow instances
+    targetTestFile: z.string().optional().describe("Specific test file path (e.g., tests/.../*.test.ts) to generate"),
+    workflowId: z.string().optional().describe("Logical workflow id for alert correlation"),
+    workflowInstanceId: z.string().optional().describe("Unique per-file workflow instance id for alert correlation"),
 });
 
 /**
@@ -404,6 +408,9 @@ export const checkSavedPlanStep = createStep({
         testSpecs: z.array(TestSpecification).optional(),
         skipToGeneration: z.boolean(),
         projectId: z.string(),
+        targetTestFile: z.string().optional(),
+        workflowId: z.string().optional(),
+        workflowInstanceId: z.string().optional(),
     }),
     execute: async ({ inputData, mastra, runId }) => {
         const { containerId, contextPath } = inputData;
@@ -416,6 +423,8 @@ export const checkSavedPlanStep = createStep({
             title: "Check saved plan",
             subtitle: "Looking for cached plan results",
             projectId: inputData.projectId,
+            workflowId: inputData.workflowId,
+            workflowInstanceId: inputData.workflowInstanceId,
         });
         
         logger?.info("⚡ Step 0/3: Fast check for saved plan", {
@@ -430,12 +439,24 @@ export const checkSavedPlanStep = createStep({
         const savedPlan = await loadPlanResults(containerId, logger);
         
         if (savedPlan && savedPlan.repoAnalysis && savedPlan.testSpecs) {
+            // Optionally narrow to a single target test file if provided
+            let narrowedSpecs = savedPlan.testSpecs;
+            if (inputData.targetTestFile) {
+                const testDir = savedPlan.repoAnalysis.testDirectory || 'tests';
+                narrowedSpecs = (savedPlan.testSpecs || []).filter((spec: any) => {
+                    const computed = (spec.sourceFile || '')
+                        .replace(/^src\//, `${testDir}/`)
+                        .replace(/\.ts$/, '.test.ts');
+                    return computed === inputData.targetTestFile;
+                });
+                if (narrowedSpecs.length === 0) narrowedSpecs = savedPlan.testSpecs;
+            }
             const highPriorityModules = savedPlan.repoAnalysis.sourceModules?.filter((m: any) => m.priority === 'high') || [];
             
             logger?.info("✅ Step 0/3: Found saved plan, skipping to test generation", {
                 step: "0/3", 
                 highPriorityModules: highPriorityModules.length,
-                testSpecs: savedPlan.testSpecs?.length || 0,
+                testSpecs: narrowedSpecs?.length || 0,
                 testingFramework: savedPlan.repoAnalysis.testingFramework,
                 type: "WORKFLOW_STEP",
                 runId: runId,
@@ -450,15 +471,20 @@ export const checkSavedPlanStep = createStep({
                 subtitle: "Skipping planning",
                 toolCallCount: cliToolMetrics.callCount,
                 projectId: inputData.projectId,
+                workflowId: inputData.workflowId,
+                workflowInstanceId: inputData.workflowInstanceId,
             });
 
             return {
                 containerId,
                 contextPath,
                 repoAnalysis: savedPlan.repoAnalysis,
-                testSpecs: savedPlan.testSpecs,
+                testSpecs: narrowedSpecs,
                 skipToGeneration: true,
                 projectId: inputData.projectId,
+                targetTestFile: inputData.targetTestFile,
+                workflowId: inputData.workflowId,
+                workflowInstanceId: inputData.workflowInstanceId,
             };
         } else {
             logger?.info("📋 Step 0/3: No saved plan found, proceeding with planning", {
@@ -476,6 +502,8 @@ export const checkSavedPlanStep = createStep({
                 subtitle: "Proceeding to plan",
                 toolCallCount: cliToolMetrics.callCount,
                 projectId: inputData.projectId,
+                workflowId: inputData.workflowId,
+                workflowInstanceId: inputData.workflowInstanceId,
             });
 
             return {
@@ -483,6 +511,9 @@ export const checkSavedPlanStep = createStep({
                 contextPath,
                 skipToGeneration: false,
                 projectId: inputData.projectId,
+                targetTestFile: inputData.targetTestFile,
+                workflowId: inputData.workflowId,
+                workflowInstanceId: inputData.workflowInstanceId,
             };
         }
     },
@@ -503,6 +534,9 @@ export const loadContextAndPlanStep = createStep({
         testSpecs: z.array(TestSpecification).optional(),
         skipToGeneration: z.boolean(),
         projectId: z.string(),
+        targetTestFile: z.string().optional(),
+        workflowId: z.string().optional(),
+        workflowInstanceId: z.string().optional(),
     }),
     outputSchema: z.object({
         containerId: z.string(),
@@ -510,6 +544,9 @@ export const loadContextAndPlanStep = createStep({
         repoAnalysis: RepoTestAnalysis,
         testSpecs: z.array(TestSpecification),
         projectId: z.string(),
+        targetTestFile: z.string().optional(),
+        workflowId: z.string().optional(),
+        workflowInstanceId: z.string().optional(),
     }),
     execute: async ({ inputData, mastra, runId }) => {
         const { containerId, contextPath, repoAnalysis, testSpecs, skipToGeneration } = inputData;
@@ -533,6 +570,8 @@ export const loadContextAndPlanStep = createStep({
                 subtitle: "Skipped - using saved plan",
                 toolCallCount: cliToolMetrics.callCount,
                 projectId: inputData.projectId,
+                workflowId: inputData.workflowId,
+                workflowInstanceId: inputData.workflowInstanceId,
             });
             
             return {
@@ -541,6 +580,9 @@ export const loadContextAndPlanStep = createStep({
                 repoAnalysis,
                 testSpecs,
                 projectId: inputData.projectId,
+                targetTestFile: inputData.targetTestFile,
+                workflowId: inputData.workflowId,
+                workflowInstanceId: inputData.workflowInstanceId,
             };
         }
         await notifyStepStatus({
@@ -551,6 +593,8 @@ export const loadContextAndPlanStep = createStep({
             title: "Load context & plan",
             subtitle: "Creating MVP plan for tests",
             projectId: inputData.projectId,
+            workflowId: inputData.workflowId,
+            workflowInstanceId: inputData.workflowInstanceId,
         });
 
         const logger = ALERTS_ONLY ? null : mastra?.getLogger();
@@ -713,14 +757,32 @@ RETURN FORMAT (JSON only - comprehensive analysis):
                 subtitle: `MVP plan created for ${highPriorityModules[0].modulePath}`,
                 toolCallCount: cliToolMetrics.callCount,
                 projectId: inputData.projectId,
+                workflowId: inputData.workflowId,
+                workflowInstanceId: inputData.workflowInstanceId,
             });
+
+            // Apply targetTestFile narrowing if provided
+            let narrowedSpecs = mvpTestSpecs;
+            if (inputData.targetTestFile) {
+                const testDir = mvpAnalysis.testDirectory || 'tests';
+                narrowedSpecs = mvpTestSpecs.filter((spec) => {
+                    const computed = spec.sourceFile
+                        .replace(/^src\//, `${testDir}/`)
+                        .replace(/\.ts$/, '.test.ts');
+                    return computed === inputData.targetTestFile;
+                });
+                if (narrowedSpecs.length === 0) narrowedSpecs = mvpTestSpecs;
+            }
 
             return {
                 containerId,
                 contextPath,
                 repoAnalysis: mvpAnalysis,
-                testSpecs: mvpTestSpecs,
+                testSpecs: narrowedSpecs,
                 projectId: inputData.projectId,
+                targetTestFile: inputData.targetTestFile,
+                workflowId: inputData.workflowId,
+                workflowInstanceId: inputData.workflowInstanceId,
             };
         } catch (error) {
             logger?.error("❌ Step 1/3: Planning failed", {
@@ -785,6 +847,8 @@ RETURN FORMAT (JSON only - comprehensive analysis):
                 level: 'error',
                 toolCallCount: cliToolMetrics.callCount,
                 projectId: inputData.projectId,
+                workflowId: inputData.workflowId,
+                workflowInstanceId: inputData.workflowInstanceId,
             });
 
             // Send completed status for fallback plan
@@ -798,6 +862,8 @@ RETURN FORMAT (JSON only - comprehensive analysis):
                 level: 'warning',
                 toolCallCount: cliToolMetrics.callCount,
                 projectId: inputData.projectId,
+                workflowId: inputData.workflowId,
+                workflowInstanceId: inputData.workflowInstanceId,
             });
 
             return {
@@ -806,6 +872,9 @@ RETURN FORMAT (JSON only - comprehensive analysis):
                 repoAnalysis: fallbackAnalysis,
                 testSpecs: fallbackTestSpecs,
                 projectId: inputData.projectId,
+                targetTestFile: inputData.targetTestFile,
+                workflowId: inputData.workflowId,
+                workflowInstanceId: inputData.workflowInstanceId,
             };
         }
     },
@@ -1086,6 +1155,9 @@ export const generateTestCodeStep = createStep({
         repoAnalysis: RepoTestAnalysis,
         testSpecs: z.array(TestSpecification),
         projectId: z.string(),
+        targetTestFile: z.string().optional(),
+        workflowId: z.string().optional(),
+        workflowInstanceId: z.string().optional(),
     }),
     outputSchema: z.object({
         containerId: z.string(),
@@ -1094,6 +1166,9 @@ export const generateTestCodeStep = createStep({
         repoAnalysis: RepoTestAnalysis,
         testSpecs: z.array(TestSpecification),
         projectId: z.string(),
+        targetTestFile: z.string().optional(),
+        workflowId: z.string().optional(),
+        workflowInstanceId: z.string().optional(),
     }),
     execute: async ({ inputData, mastra, runId }) => {
         const { containerId, repoAnalysis, testSpecs } = inputData;
@@ -1114,10 +1189,11 @@ export const generateTestCodeStep = createStep({
         }
 
         const sourceFile = testSpec.sourceFile;
-        // Convert src/mastra/tools/cli-tool.ts to tests/mastra/tools/cli-tool.test.ts (project-agnostic)
-        const testFile = sourceFile
-            .replace(/^src\//, `${repoAnalysis.testDirectory}/`)  // Replace src/ with tests/
-            .replace(/\.ts$/, '.test.ts');  // Add .test before .ts extension
+        // Convert src/... to tests/...; allow override via targetTestFile
+        const computedTestFile = sourceFile
+            .replace(/^src\//, `${repoAnalysis.testDirectory}/`)
+            .replace(/\.ts$/, '.test.ts');
+        const testFile = inputData.targetTestFile || computedTestFile;
 
         const prompt = `CRITICAL: Return ONLY valid JSON. No explanations, no comments.
 
@@ -1311,6 +1387,8 @@ RETURN FORMAT (JSON only - MUST return accurate counts):
                 subtitle: result.testFile,
                 toolCallCount: cliToolMetrics.callCount,
                 projectId: inputData.projectId,
+                workflowId: inputData.workflowId,
+                workflowInstanceId: inputData.workflowInstanceId,
             });
 
             // Create simple test generation result
@@ -1338,6 +1416,9 @@ RETURN FORMAT (JSON only - MUST return accurate counts):
                 repoAnalysis,
                 testSpecs: [testSpec],
                 projectId: inputData.projectId,
+                targetTestFile: inputData.targetTestFile,
+                workflowId: inputData.workflowId,
+                workflowInstanceId: inputData.workflowInstanceId,
             };
         } catch (error) {
             logger?.error("❌ Step 2/3: Simple test generation failed", {
@@ -1357,6 +1438,8 @@ RETURN FORMAT (JSON only - MUST return accurate counts):
                 level: 'error',
                 toolCallCount: cliToolMetrics.callCount,
                 projectId: inputData.projectId,
+                workflowId: inputData.workflowId,
+                workflowInstanceId: inputData.workflowInstanceId,
             });
 
             // Return failed result
@@ -1393,6 +1476,9 @@ RETURN FORMAT (JSON only - MUST return accurate counts):
                 repoAnalysis,
                 testSpecs: [testSpec],
                 projectId: inputData.projectId,
+                targetTestFile: inputData.targetTestFile,
+                workflowId: inputData.workflowId,
+                workflowInstanceId: inputData.workflowInstanceId,
             };
         }
     },
@@ -1409,7 +1495,9 @@ async function ensureCompletionNotification(
     projectId: string,
     success: boolean,
     subtitle?: string,
-    error?: string
+    error?: string,
+    workflowId?: string,
+    workflowInstanceId?: string
 ): Promise<void> {
     try {
         await notifyStepStatus({
@@ -1422,6 +1510,8 @@ async function ensureCompletionNotification(
             level: error ? 'error' : (success ? 'success' : 'warning'),
             toolCallCount: cliToolMetrics.callCount,
             projectId,
+            workflowId,
+            workflowInstanceId,
         });
     } catch (notificationError) {
         // Log the notification failure but don't throw to avoid masking the original result
@@ -1446,11 +1536,17 @@ export const finalizeStep = createStep({
         projectId: z.string(),
         retryCount: z.number().optional().default(0),
         lastError: z.string().optional(),
+        targetTestFile: z.string().optional(),
+        workflowId: z.string().optional(),
+        workflowInstanceId: z.string().optional(),
     }),
     outputSchema: UnitTestResult.extend({
         projectId: z.string(),
         containerId: z.string(),
         contextPath: z.string().optional(),
+        targetTestFile: z.string().optional(),
+        workflowId: z.string().optional(),
+        workflowInstanceId: z.string().optional(),
     }),
     execute: async ({ inputData, mastra, runId }) => {
         const { testGeneration, containerId, repoAnalysis, testSpecs, retryCount = 0, lastError } = inputData;
@@ -1471,6 +1567,8 @@ export const finalizeStep = createStep({
                 title: "Finalize",
                 subtitle: "Validation and recommendations",
                 projectId: inputData.projectId,
+                workflowId: inputData.workflowId,
+                workflowInstanceId: inputData.workflowInstanceId,
             });
             
             logger?.info("🔍 Step 3/3: Enhanced finalization with syntax validation and retry logic", {
@@ -1665,6 +1763,9 @@ RETURN VALIDATION RESULTS (JSON only):
                 projectId: inputData.projectId,
                 containerId,
                 contextPath: inputData.contextPath,
+                targetTestFile: inputData.targetTestFile,
+                workflowId: inputData.workflowId,
+                workflowInstanceId: inputData.workflowInstanceId,
             };
 
             return executionResult;
@@ -1695,6 +1796,9 @@ RETURN VALIDATION RESULTS (JSON only):
                 projectId: inputData.projectId,
                 containerId,
                 contextPath: inputData.contextPath,
+                targetTestFile: inputData.targetTestFile,
+                workflowId: inputData.workflowId,
+                workflowInstanceId: inputData.workflowInstanceId,
             };
 
             throw executionError; // Re-throw to trigger finally block
@@ -1715,7 +1819,9 @@ RETURN VALIDATION RESULTS (JSON only):
                     inputData.projectId,
                     finalSuccess,
                     finalSubtitle,
-                    executionError?.message
+                    executionError?.message,
+                    inputData.workflowId,
+                    inputData.workflowInstanceId
                 );
                 
                 logger?.info("📤 Finalize step completion notification sent", {

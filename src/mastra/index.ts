@@ -117,20 +117,20 @@ export const mastra = new Mastra({
       })
     ]
   },
-  logger: new PinoLogger({
-    name: 'Mastra',
-    // Set to 'silent' when running in alerts-only mode to suppress all logs except notifyStepStatus
-    level: getLogLevel(),
-  }),
-  telemetry: {
-    serviceName: 'yc-24h-hackathon-agent',
-    // Disable telemetry entirely when alerts-only mode is enabled
-    enabled: !ALERTS_ONLY,
-    sampling: {
-      type: 'always_on', // Capture all traces for development
-    },
-    export: {
-      type: 'console', // Console output for development
-    },
-  },
+  // logger: new PinoLogger({
+  //   name: 'Mastra',
+  //   // Set to 'silent' when running in alerts-only mode to suppress all logs except notifyStepStatus
+  //   level: getLogLevel(),
+  // }),
+  // telemetry: {
+  //   serviceName: 'yc-24h-hackathon-agent',
+  //   // Disable telemetry entirely when alerts-only mode is enabled
+  //   enabled: !ALERTS_ONLY,
+  //   sampling: {
+  //     type: 'always_on', // Capture all traces for development
+  //   },
+  //   export: {
+  //     type: 'console', // Console output for development
+  //   },
+  // },
 });

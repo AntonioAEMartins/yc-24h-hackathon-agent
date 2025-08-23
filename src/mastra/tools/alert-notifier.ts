@@ -16,6 +16,9 @@ export const AlertEventSchema = z.object({
     // Meta
     level: AlertLevelSchema.default('info'),
     source: z.string().optional().default('mastra-agent'),
+    // Workflow correlation
+    workflowId: z.string().optional(),
+    workflowInstanceId: z.string().optional(),
 
     // Correlation identifiers
     projectId: z.string().optional(),
@@ -94,31 +97,35 @@ export async function notifyStepStatus(params: {
     title?: string;
     subtitle?: string;
     metadata?: Record<string, any>;
+    workflowId?: string;
+    workflowInstanceId?: string;
 }): Promise<void> {
-    const { stepId, status, runId, projectId: paramProjectId, containerId, contextPath, toolCallCount, level, title, subtitle, metadata } = params;
+    const { stepId, status, runId, projectId: paramProjectId, containerId, contextPath, toolCallCount, level, title, subtitle, metadata, workflowId, workflowInstanceId } = params;
 
     // Resolve projectId from param or association map
     const projectId = paramProjectId || getProjectIdForRun(runId);
 
-    // console.log("🔔 Notifying step status", {
-    //     title: title || `[${stepId}] ${status}`,
-    //     subtitle: subtitle || `Step ${stepId} is ${status}`,
-    //     stepId,
-    //     status,
-    //     runId,
-    //     workflowId,
-    //     containerId,
-    //     contextPath,
-    //     toolCallCount,
-    //     level,
-    //     metadata,
-    // });
+    console.log("🔔 Notifying step status", {
+        title: title || `[${stepId}] ${status}`,
+        subtitle: subtitle || `Step ${stepId} is ${status}`,
+        stepId,
+        status,
+        runId,
+        workflowId,
+        containerId,
+        contextPath,
+        toolCallCount,
+        level,
+        metadata,
+    });
 
     await sendAlertEvent({
         title: title || `[${stepId}] ${status}`,
         subtitle: subtitle || `Step ${stepId} is ${status}`,
         level: level || (status === 'failed' ? 'error' : status === 'completed' ? 'success' : 'info'),
         source: 'mastra-agent',
+        workflowId,
+        workflowInstanceId,
         projectId,
         runId,
         stepId,
