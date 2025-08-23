@@ -1,3 +1,4 @@
+/* COMMENTED OUT FOR MVP VALIDATION - NOT USED IN SIMPLE APPROACH
 import { Agent } from "@mastra/core";
 import { openai } from "@ai-sdk/openai";
 import { taskLoggingTool } from "../tools/task-logging-tool";
@@ -76,3 +77,4 @@ Always use task_logging to report your progress: start, planning, coding, valida
         docker_exec: dockerExecTool,
     },
 });
+*/ // END COMMENTED OUT CODER AGENT

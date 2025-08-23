@@ -1,3 +1,4 @@
+/* COMMENTED OUT FOR MVP VALIDATION - NOT USED IN SIMPLE APPROACH
 import { Agent } from "@mastra/core";
 import { openai } from "@ai-sdk/openai";
 import { taskLoggingTool } from "../tools/task-logging-tool";
@@ -60,3 +61,4 @@ Always start by logging your planning phase and end by logging completion status
         docker_exec: dockerExecTool,
     },
 });
+*/ // END COMMENTED OUT MANAGER AGENT

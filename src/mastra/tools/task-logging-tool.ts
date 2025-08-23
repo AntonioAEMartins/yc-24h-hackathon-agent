@@ -22,10 +22,10 @@ export const taskLoggingTool = createTool({
         taskId: z.string().describe("Unique identifier for the task"),
         taskName: z.string().describe("Human-readable task name"),
         status: z.enum(['started', 'completed', 'failed', 'planning', 'coding', 'validating']).describe("Current task status"),
-        metadata: z.record(z.string(), z.unknown()).optional().describe("Additional task metadata"),
+
     }),
     execute: async ({ context }) => {
-        const { agentId, taskId, taskName, status, metadata } = context;
+        const { agentId, taskId, taskName, status } = context;
         
         const event: TaskEvent = {
             agentId,
@@ -33,15 +33,14 @@ export const taskLoggingTool = createTool({
             taskName,
             status,
             timestamp: new Date(),
-            metadata: metadata || {}
+            metadata: {}
         };
         
         taskEvents.push(event);
         
         // Log to console for immediate visibility
         const timestamp = event.timestamp.toISOString();
-        const metadataStr = metadata ? ` | ${JSON.stringify(metadata)}` : '';
-        console.log(`[${timestamp}] Agent:${agentId} | Task:${taskId} (${taskName}) | Status:${status}${metadataStr}`);
+        console.log(`[${timestamp}] Agent:${agentId} | Task:${taskId} (${taskName}) | Status:${status}`);
         
         return {
             success: true,
