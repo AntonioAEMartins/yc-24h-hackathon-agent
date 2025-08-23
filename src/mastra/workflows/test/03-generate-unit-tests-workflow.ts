@@ -2,6 +2,10 @@ import { createStep, createWorkflow } from "@mastra/core";
 import { mastra } from "../..";
 import z from "zod";
 import { cliToolMetrics } from "../../tools/cli-tool";
+import { exec } from "child_process";
+import { writeFileSync, unlinkSync, mkdtempSync } from "fs";
+import path from "path";
+import os from "os";
 
 // ============================================================================
 // SCHEMA DEFINITIONS
@@ -272,43 +276,64 @@ async function callAgent<T>(
  * Helper function to save plan results to static file for fast resume
  */
 async function savePlanResults(containerId: string, planData: any, logger?: any): Promise<void> {
-    const saveFilePath = `/app/03-plan-step.json`;
+    const saveFilePath = `/app/unit.plan.json`;
     
-    try {
-        const prompt = `Save plan results to static file using docker_exec with containerId='${containerId}'.
+    return await new Promise((resolve) => {
+        let tempFilePath: string | null = null;
+        try {
+            const tempDir = mkdtempSync(path.join(os.tmpdir(), 'docker-plan-'));
+            tempFilePath = path.join(tempDir, 'unit.plan.json');
+            writeFileSync(tempFilePath, JSON.stringify(planData, null, 2), 'utf8');
 
-TASK: Save plan data to static file for fast resume functionality.
+            const cpCmd = `docker cp "${tempFilePath}" ${containerId}:${saveFilePath}`;
+            exec(cpCmd, (cpErr, _cpOut, cpErrOut) => {
+                try { if (tempFilePath) unlinkSync(tempFilePath); } catch {}
+                if (cpErr) {
+                    logger?.warn("⚠️ Failed to save plan results", {
+                        saveFilePath,
+                        error: cpErrOut || cpErr.message,
+                        type: "PLAN_SAVE"
+                    });
+                    resolve();
+                    return;
+                }
 
-Instructions:
-1. Create the plan file: echo '${JSON.stringify(planData).replace(/'/g, "'\\''")}' > ${saveFilePath}
-2. Verify file was created: ls -la ${saveFilePath}
-
-Save the plan data so the workflow can resume quickly.`;
-
-        await callAgent("unitTestAgent", prompt, z.object({
-            success: z.boolean(),
-            message: z.string(),
-        }), 100, undefined, logger);
-        
-        logger?.info("💾 Plan results saved to static file", {
-            saveFilePath,
-            containerId: containerId.substring(0, 12),
-            type: "PLAN_SAVE"
-        });
-    } catch (error) {
-        logger?.warn("⚠️ Failed to save plan results", {
-            saveFilePath,
-            error: error instanceof Error ? error.message : 'Unknown error',
-            type: "PLAN_SAVE"
-        });
-    }
+                const verifyCmd = `docker exec ${containerId} bash -lc "test -f ${saveFilePath} && wc -c ${saveFilePath}"`;
+                exec(verifyCmd, (vErr, vOut, vErrOut) => {
+                    if (vErr) {
+                        logger?.warn("⚠️ Plan file verification failed", {
+                            saveFilePath,
+                            error: vErrOut || vErr.message,
+                            type: "PLAN_SAVE"
+                        });
+                    } else {
+                        logger?.info("💾 Plan results saved to static file", {
+                            saveFilePath,
+                            containerId: containerId.substring(0, 12),
+                            size: vOut.trim(),
+                            type: "PLAN_SAVE"
+                        });
+                    }
+                    resolve();
+                });
+            });
+        } catch (error) {
+            try { if (tempFilePath) unlinkSync(tempFilePath); } catch {}
+            logger?.warn("⚠️ Failed to create temp plan file", {
+                saveFilePath,
+                error: error instanceof Error ? error.message : 'Unknown error',
+                type: "PLAN_SAVE"
+            });
+            resolve();
+        }
+    });
 }
 
 /**
  * Helper function to load saved plan results statically (no agent calls)
  */
 async function loadPlanResults(containerId: string, logger?: any): Promise<any | null> {
-    const saveFilePath = `/app/03-plan-step.json`;
+    const saveFilePath = `/app/unit.plan.json`;
     
     try {
         // Use direct file operations for faster access
@@ -480,44 +505,91 @@ const loadContextAndPlanStep = createStep({
 
                 const prompt = `CRITICAL: Return ONLY valid JSON. No explanations, no comments.
 
-TASK: Load context and plan testing for ONE high priority module using docker_exec with containerId='${containerId}'.
+TASK: Intelligent context analysis and high-priority module testing strategy using docker_exec with containerId='${containerId}'.
 
-Instructions:
-1. Read context file: cat ${contextPath}
-2. Identify source directories and files
-3. Choose ONLY ONE highest priority module/file for MVP
-4. Generate comprehensive test specs for that ONE module
-5. Use vitest framework with separate test directory at project root
+🔍 CONTEXT ANALYSIS WORKFLOW:
 
-RETURN FORMAT (JSON only):
+PHASE 1: REPOSITORY DISCOVERY
+1. Find project directory: docker_exec ls -la /app/ | grep "^d" | grep -v "\\." | awk '{print $NF}' | head -1
+2. Read comprehensive context: docker_exec cat ${contextPath}
+3. Parse repository structure, frameworks, and dependencies
+4. Identify source code patterns and architecture
+
+PHASE 2: INTELLIGENT MODULE PRIORITIZATION
+5. Analyze source directories and scan for modules: docker_exec find /app/PROJECT_DIR/src -name "*.ts" -type f | head -20
+6. Evaluate module complexity and testability based on:
+   - Core business logic vs utilities
+   - External dependency count
+   - Function complexity and async patterns
+   - Error handling requirements
+   - Integration points with other modules
+7. Select the SINGLE highest value module for MVP testing
+
+PHASE 3: COMPREHENSIVE TEST SPECIFICATION
+8. Deep-analyze the selected module: docker_exec cat /app/PROJECT_DIR/[SELECTED_SOURCE_FILE]
+9. Extract all exportable functions, classes, and methods
+10. Design comprehensive test scenarios for each function:
+    - Success paths with various input combinations
+    - Error conditions and edge cases
+    - Async/Promise handling patterns
+    - Mock integration requirements
+    - Performance and boundary testing
+11. Create detailed test case specifications with clear expectations
+
+🎯 STRATEGIC SELECTION CRITERIA:
+- Choose modules with high business value and testability
+- Prioritize core functionality over utilities
+- Consider modules with complex logic that benefit most from testing
+- Select files with multiple functions and varied scenarios
+- Prefer modules with external dependencies for comprehensive mocking
+
+🏗️ TESTING ARCHITECTURE REQUIREMENTS:
+- Use vitest framework with TypeScript support
+- Implement separate test directory structure (tests/ parallel to src/)
+- Design for co-located testing patterns when beneficial
+- Plan for comprehensive mocking strategies
+- Structure for maintainable and scalable test suites
+
+RETURN FORMAT (JSON only - comprehensive analysis):
 {
   "repoAnalysis": {
-  "sourceModules": [
-    {
-        "modulePath": "src/mastra/tools",
-        "sourceFiles": ["cli-tool.ts"],
-      "priority": "high",
-      "language": "typescript"
-    }
-  ],
+    "sourceModules": [
+      {
+        "modulePath": "[ANALYZED_MODULE_PATH]",
+        "sourceFiles": ["[SELECTED_HIGH_VALUE_FILE]"],
+        "priority": "high",
+        "language": "typescript",
+        "complexity": "medium|high",
+        "testability": "excellent|good",
+        "businessValue": "core|important|utility",
+        "dependencyCount": [NUMBER_OF_EXTERNAL_DEPS]
+      }
+    ],
     "testingFramework": "vitest",
     "testDirectory": "tests",
-    "totalFiles": 1
+    "totalFiles": 1,
+    "selectionReason": "[WHY_THIS_MODULE_WAS_CHOSEN]"
   },
   "testSpecs": [
     {
-      "sourceFile": "src/mastra/tools/cli-tool.ts",
+      "sourceFile": "[FULL_SOURCE_FILE_PATH]",
       "functions": [
         {
-          "name": "cliTool.execute",
+          "name": "[FUNCTION_NAME]",
           "testCases": [
-            "should resolve with stdout when exec succeeds",
-            "should reject with error when exec fails",
-            "should throw when cmd is missing",
-            "should increment metrics on valid calls"
-          ]
+            "should [expected_behavior] when [success_condition]",
+            "should [error_behavior] when [error_condition]",
+            "should [edge_case_behavior] when [boundary_condition]",
+            "should [async_behavior] when [promise_condition]",
+            "should [validation_behavior] when [input_validation_needed]"
+          ],
+          "mockRequirements": ["[EXTERNAL_DEPENDENCY_1]", "[EXTERNAL_DEPENDENCY_2]"],
+          "complexity": "simple|medium|complex",
+          "isAsync": true|false
         }
-      ]
+      ],
+      "overallComplexity": "simple|medium|complex",
+      "estimatedTestCount": [REALISTIC_TEST_COUNT]
     }
   ]
 }`;
@@ -592,17 +664,22 @@ RETURN FORMAT (JSON only):
                 runId: runId,
             });
 
-                        // Return minimal fallback plan for MVP
+                        // Return comprehensive fallback plan for MVP
             const fallbackAnalysis = {
                     sourceModules: [{
                     modulePath: "src/mastra/tools",
                     sourceFiles: ["cli-tool.ts"],
                     priority: "high" as const,
                         language: "typescript",
+                        complexity: "medium" as const,
+                        testability: "excellent" as const,
+                        businessValue: "core" as const,
+                        dependencyCount: 2,
                     }],
                 testingFramework: "vitest",
                 testDirectory: "tests",
                     totalFiles: 1,
+                    selectionReason: "CLI tool selected as fallback - core utility with external dependencies suitable for comprehensive testing",
             };
             
             const fallbackTestSpecs = [{
@@ -610,11 +687,19 @@ RETURN FORMAT (JSON only):
                 functions: [{
                     name: "cliTool.execute",
                     testCases: [
-                        "should execute command successfully",
-                        "should handle errors properly",
-                        "should validate input parameters"
-                    ]
-                }]
+                        "should execute command successfully with valid parameters",
+                        "should reject with proper error when execution fails",
+                        "should validate input parameters and throw on invalid input",
+                        "should handle timeout scenarios appropriately",
+                        "should increment metrics on successful calls",
+                        "should handle stderr output correctly"
+                    ],
+                    mockRequirements: ["child_process", "@mastra/core"],
+                    complexity: "medium" as const,
+                    isAsync: true,
+                }],
+                overallComplexity: "medium" as const,
+                estimatedTestCount: 6,
             }];
 
             return {
@@ -626,6 +711,224 @@ RETURN FORMAT (JSON only):
         }
     },
 });
+
+/**
+ * Helper function to retry test generation with error feedback
+ */
+async function retryTestGeneration(
+    containerId: string,
+    repoAnalysis: z.infer<typeof RepoTestAnalysis>,
+    testSpecs: z.infer<typeof TestSpecification>[],
+    retryCount: number,
+    errorFeedback: string | undefined,
+    mastra: any,
+    runId?: string,
+    logger?: any
+): Promise<z.infer<typeof UnitTestResult>> {
+    if (testSpecs.length === 0) {
+        throw new Error("Cannot retry test generation without test specifications");
+    }
+
+    logger?.info("🔄 Initiating test generation retry with error feedback", {
+        retryCount,
+        hasErrorFeedback: !!errorFeedback,
+        type: "RETRY_GENERATION",
+        runId: runId,
+    });
+
+    const testSpec = testSpecs[0];
+    const sourceFile = testSpec.sourceFile;
+    const testFile = sourceFile
+        .replace(/^src\//, `${repoAnalysis.testDirectory}/`)
+        .replace(/\.ts$/, '.test.ts');
+
+    const retryPrompt = `CRITICAL: Return ONLY valid JSON. No explanations, no comments.
+
+TASK: RETRY test generation with error feedback and corrections using docker_exec with containerId='${containerId}'.
+
+🚨 RETRY ATTEMPT ${retryCount} 🚨
+
+PREVIOUS ERROR FEEDBACK:
+${errorFeedback || 'No specific error feedback available'}
+
+SOURCE FILE: ${sourceFile}
+TEST FILE: ${testFile}
+FRAMEWORK: ${repoAnalysis.testingFramework}
+
+🔧 ERROR-DRIVEN CORRECTION WORKFLOW:
+
+PHASE 1: ERROR ANALYSIS & DISCOVERY
+1. Find project directory: docker_exec ls -la /app/ | grep "^d" | grep -v "\\." | awk '{print $NF}' | head -1
+2. Read source file thoroughly: docker_exec cat /app/PROJECT_DIR/${sourceFile}
+3. Check existing test file (if any): docker_exec cat /app/PROJECT_DIR/${testFile} 2>/dev/null || echo "NO_EXISTING_TEST"
+4. Analyze the specific error patterns from feedback
+5. Identify root causes (syntax, imports, mocking, types, etc.)
+
+PHASE 2: TARGETED ERROR CORRECTION
+6. Based on error feedback, apply specific fixes:
+   - If syntax errors: Fix TypeScript compilation issues
+   - If import errors: Correct import paths and module references
+   - If mocking errors: Fix vi.mock configurations and typing
+   - If execution errors: Fix async/await patterns and assertions
+   - If dependency errors: Ensure proper external dependency handling
+
+PHASE 3: ENHANCED TEST GENERATION
+7. Ensure directory exists using file tool: file_operations create_dir with filePath "/app/PROJECT_DIR/$(dirname ${testFile})"
+8. Generate CORRECTED test file addressing all error feedback using file tool:
+
+MANDATORY ERROR-CORRECTED PATTERNS:
+- Fix ALL syntax issues identified in error feedback
+- Correct import statements based on actual source analysis
+- Fix mocking configurations with proper vi.mock syntax
+- Ensure proper TypeScript typing throughout
+- Fix async/await patterns if Promise-related errors occurred
+- Correct assertion patterns and test structure
+- Address any framework-specific issues
+
+TEST SPECIFICATION (implement with error corrections):
+${JSON.stringify(testSpec, null, 2)}
+
+9. Persist test file using file tool:
+   - Use file_operations write with filePath "/app/PROJECT_DIR/${testFile}" and content set to the full corrected test code exactly
+
+PHASE 4: VERIFICATION WITH ERROR PREVENTION
+10. Verify file creation: docker_exec ls -la /app/PROJECT_DIR/${testFile}
+11. Quick syntax check: docker_exec head -30 /app/PROJECT_DIR/${testFile}
+12. Verify corrections address the reported errors
+13. Confirm line count shows substantial content: docker_exec wc -l /app/PROJECT_DIR/${testFile}
+
+🎯 RETRY-SPECIFIC REQUIREMENTS:
+- MUST directly address each error mentioned in feedback
+- MUST improve upon the previous attempt substantially
+- MUST ensure syntax validity and proper imports
+- MUST fix any mocking or dependency issues from feedback
+- MUST generate executable, working test code
+- MUST include comprehensive error handling
+- Generate AT LEAST 5+ test cases per function (more if errors indicated coverage issues)
+
+🚨 ABSOLUTE REQUIREMENTS 🚨
+- MUST use the exact test file path: ${testFile}
+- MUST create INSIDE the project directory
+- MUST analyze and fix ALL errors from feedback
+- MUST actually write corrected content to disk
+- MUST verify the file exists and has substantial content
+- Tests must be sophisticated, corrected, and executable
+- THE FILE MUST BE PHYSICALLY SAVED, READABLE, AND ERROR-FREE
+
+RETURN FORMAT (JSON only - MUST return accurate counts after corrections):
+{
+  "sourceFile": "${sourceFile}",
+  "testFile": "${testFile}",
+  "functionsCount": [ACTUAL_FUNCTION_COUNT],
+  "testCasesCount": [ACTUAL_TEST_CASES_COUNT],
+  "success": true,
+  "correctionsMade": "[SUMMARY_OF_CORRECTIONS_APPLIED]"
+}`;
+
+    try {
+        const retryResult = await callAgent("unitTestAgent", retryPrompt, z.object({
+            sourceFile: z.string(),
+            testFile: z.string(),
+            functionsCount: z.number(),
+            testCasesCount: z.number(),
+            success: z.boolean(),
+            error: z.string().optional(),
+            correctionsMade: z.string().optional(),
+        }), 700, runId, logger); // More steps for retry with corrections
+
+        logger?.info("✅ Retry test generation completed", {
+            retryCount,
+            success: retryResult.success,
+            testFile: retryResult.testFile,
+            functionsCount: retryResult.functionsCount,
+            testCasesCount: retryResult.testCasesCount,
+            correctionsMade: retryResult.correctionsMade?.substring(0, 100),
+            type: "RETRY_GENERATION",
+            runId: runId,
+        });
+
+        // Create test generation result for retry
+        const retryTestGeneration: z.infer<typeof TestGenerationResult> = {
+            testFiles: [retryResult],
+            summary: {
+                totalSourceFiles: 1,
+                totalTestFiles: retryResult.success ? 1 : 0,
+                totalFunctions: retryResult.functionsCount,
+                totalTestCases: retryResult.testCasesCount,
+                successfulFiles: retryResult.success ? 1 : 0,
+                failedFiles: retryResult.success ? 0 : 1,
+            },
+            quality: {
+                syntaxValid: retryResult.success,
+                followsBestPractices: retryResult.success,
+                coverageScore: retryResult.success ? 80 : 0,
+            },
+        };
+
+        // Return the retry test generation result (let finalize step handle final processing)
+        return {
+            result: retryResult.success 
+                ? `✅ Test generation retry ${retryCount} successful: ${retryResult.testFile} created`
+                : `❌ Test generation retry ${retryCount} failed`,
+            success: retryResult.success,
+            toolCallCount: cliToolMetrics.callCount,
+            testGeneration: retryTestGeneration,
+            recommendations: [
+                `Retry attempt ${retryCount} completed with ${retryResult.success ? 'success' : 'failure'}`,
+                ...(retryResult.correctionsMade ? [`Corrections applied: ${retryResult.correctionsMade}`] : []),
+                "Review error feedback and consider manual intervention if retries continue to fail"
+            ],
+        };
+
+    } catch (error) {
+        logger?.error("❌ Retry test generation failed", {
+            retryCount,
+            error: error instanceof Error ? error.message : 'Unknown error',
+            type: "RETRY_GENERATION",
+            runId: runId,
+        });
+
+        // Return failed result for retry
+        const failedRetryResult = {
+            sourceFile,
+            testFile,
+            functionsCount: 0,
+            testCasesCount: 0,
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error',
+        };
+
+        const failedTestGeneration: z.infer<typeof TestGenerationResult> = {
+            testFiles: [failedRetryResult],
+            summary: {
+                totalSourceFiles: 1,
+                totalTestFiles: 0,
+                totalFunctions: 0,
+                totalTestCases: 0,
+                successfulFiles: 0,
+                failedFiles: 1,
+            },
+            quality: {
+                syntaxValid: false,
+                followsBestPractices: false,
+                coverageScore: 0,
+            },
+        };
+
+        // Return failed retry result (let finalize step handle final processing)
+        return {
+            result: `❌ Test generation retry ${retryCount} failed with error`,
+            success: false,
+            toolCallCount: cliToolMetrics.callCount,
+            testGeneration: failedTestGeneration,
+            recommendations: [
+                `Retry attempt ${retryCount} failed with error: ${failedRetryResult.error}`,
+                "Review error patterns and consider manual test creation",
+                "Check Docker container and dependency availability"
+            ],
+        };
+    }
+}
 
 /**
  * Helper function to save checkpoint results during block generation
@@ -973,6 +1276,8 @@ const generateTestCodeStep = createStep({
     outputSchema: z.object({
         containerId: z.string(),
         testGeneration: TestGenerationResult,
+        repoAnalysis: RepoTestAnalysis,
+        testSpecs: z.array(TestSpecification),
     }),
     execute: async ({ inputData, mastra, runId }) => {
         const { containerId, repoAnalysis, testSpecs } = inputData;
@@ -1000,7 +1305,7 @@ const generateTestCodeStep = createStep({
 
         const prompt = `CRITICAL: Return ONLY valid JSON. No explanations, no comments.
 
-TASK: Generate a simple vitest test file using docker_exec with containerId='${containerId}'.
+TASK: Generate high-quality vitest test file with nano-level reasoning using docker_exec with containerId='${containerId}'.
 
 SOURCE FILE: ${sourceFile}
 TEST FILE: ${testFile}
@@ -1013,57 +1318,133 @@ FRAMEWORK: ${repoAnalysis.testingFramework}
 - DO NOT create it at: /app/tests/ (wrong location - must be inside project)
 - MUST be inside the project directory at: PROJECT_DIR/${testFile}
 
-TEST SPECIFICATION:
+TEST SPECIFICATION (analyze thoroughly):
 ${JSON.stringify(testSpec, null, 2)}
 
-MANDATORY WORKFLOW STEPS (FOLLOW EXACTLY):
+🧠 NANO-LEVEL REASONING WORKFLOW:
+
+PHASE 1: DISCOVERY & ANALYSIS
 1. Find project directory: docker_exec ls -la /app/ | grep "^d" | grep -v "\\." | awk '{print $NF}' | head -1
 2. Set PROJECT_DIR variable based on step 1 result
-3. Read source file: docker_exec cat /app/PROJECT_DIR/${sourceFile}
-4. Create test directory structure: docker_exec mkdir -p /app/PROJECT_DIR/$(dirname ${testFile})
-5. Create the actual test file content and save it:
-   docker_exec bash -c "cat > /app/PROJECT_DIR/${testFile} << 'EOF'
-import { vi, expect, describe, it } from 'vitest';
-import { exec } from 'child_process';
+3. Read and analyze source file: docker_exec cat /app/PROJECT_DIR/${sourceFile}
+4. Identify imports, exports, functions, classes, and dependencies
+5. Analyze function signatures, parameters, return types, and error conditions
+6. Determine external dependencies that need mocking
+7. Identify async/sync patterns and Promise handling needs
 
-vi.mock('child_process');
+PHASE 2: INTELLIGENT TEST DESIGN
+8. Map each function to comprehensive test scenarios:
+   - Happy path with valid inputs
+   - Edge cases with boundary values
+   - Error conditions and exception handling
+   - Async/Promise resolution and rejection flows
+   - Mock integration and dependency injection
+9. Design mock strategies for external dependencies (fs, child_process, @mastra/core, etc.)
+10. Plan test structure with proper setup/teardown
+11. Determine assertion strategies and coverage goals
 
-describe('cli-tool', () => {
-  it('should execute command successfully', () => {
-    expect(true).toBe(true);
-  });
+PHASE 3: SOPHISTICATED CODE GENERATION
+12. Ensure directory exists: file_operations create_dir with filePath "/app/PROJECT_DIR/$(dirname ${testFile})"
+13. Generate comprehensive test file with advanced patterns:
+
+REQUIRED TEST PATTERNS:
+- Proper vitest imports (vi, expect, describe, it, beforeEach, afterEach, beforeAll, afterAll)
+- Smart mocking of ALL external dependencies with proper typing
+- Comprehensive test cases covering ALL functions from specification
+- Error boundary testing with proper error assertions
+- Async/await testing patterns with proper Promise handling
+- Mock setup/reset in beforeEach/afterEach hooks
+- Descriptive test names following "should [expected behavior] when [condition]" pattern
+- Proper TypeScript typing and interface mocking
+- Integration test considerations where applicable
+- Performance and edge case coverage
+
+EXAMPLE SOPHISTICATED STRUCTURE:
+\`\`\`typescript
+import { vi, expect, describe, it, beforeEach, afterEach } from 'vitest';
+import type { Mock } from 'vitest';
+
+// Import source modules and types
+import { [ACTUAL_IMPORTS_FROM_SOURCE] } from '[ACTUAL_IMPORT_PATH]';
+
+// Mock external dependencies
+vi.mock('child_process', () => ({
+  exec: vi.fn(),
+}));
+
+vi.mock('@mastra/core', () => ({
+  // Mock actual exports based on source analysis
+}));
+
+describe('[MODULE_NAME]', () => {
+  // Proper mock typing
+  const mockExec = vi.mocked(require('child_process').exec);
   
-  it('should handle errors', () => {
-    expect(true).toBe(true);
+  beforeEach(() => {
+    vi.clearAllMocks();
   });
-  
-  it('should return correct output', () => {
-    expect(true).toBe(true);
+
+  afterEach(() => {
+    vi.resetAllMocks();
+  });
+
+  describe('[FUNCTION_NAME]', () => {
+    it('should handle successful execution with valid parameters', async () => {
+      // Comprehensive positive test case
+    });
+    
+    it('should reject with proper error when execution fails', async () => {
+      // Error condition testing
+    });
+    
+    it('should validate input parameters and throw on invalid input', () => {
+      // Input validation testing
+    });
+    
+    // Additional test cases based on function complexity
   });
 });
-EOF"
-6. Verify file was created: docker_exec ls -la /app/PROJECT_DIR/${testFile}
-7. Verify file has content: docker_exec cat /app/PROJECT_DIR/${testFile}
-8. Confirm file size: docker_exec wc -l /app/PROJECT_DIR/${testFile}
+\`\`\`
+
+14. Write sophisticated test file using file tool:
+   - Use file_operations write with filePath "/app/PROJECT_DIR/${testFile}" and content set to the full generated test code exactly
+
+PHASE 4: VERIFICATION & QUALITY ASSURANCE
+15. Verify file creation: docker_exec ls -la /app/PROJECT_DIR/${testFile}
+16. Verify file content: docker_exec cat /app/PROJECT_DIR/${testFile}
+17. Check syntax validity: docker_exec head -50 /app/PROJECT_DIR/${testFile}
+18. Confirm line count and complexity: docker_exec wc -l /app/PROJECT_DIR/${testFile}
+19. Validate test structure meets quality standards
+
+🎯 QUALITY REQUIREMENTS:
+- ALL functions from specification must have comprehensive tests
+- Mock ALL external dependencies with proper typing
+- Include positive, negative, and edge case scenarios
+- Use proper async/await patterns where needed
+- Follow vitest best practices and TypeScript standards
+- Generate AT LEAST 5+ test cases per function
+- Include proper error handling and validation tests
+- Use descriptive test names and organize with nested describe blocks
+- Ensure tests are actually executable and syntactically correct
+- Include performance considerations for complex operations
 
 🚨 ABSOLUTE REQUIREMENTS 🚨
 - MUST use the exact test file path: ${testFile}
 - MUST create INSIDE the project directory (NOT at /app/ root level)
 - MUST dynamically find the project directory first
-- MUST actually write the file content to disk (not just return JSON)
-- MUST verify the file exists and has content before returning
-- Use vitest syntax
-- Mock external dependencies
-- Include basic test cases
-- Keep it simple but functional
-- THE FILE MUST BE PHYSICALLY SAVED AND READABLE
+- MUST actually write the sophisticated test content to disk
+- MUST verify the file exists and has substantial content
+- MUST analyze source file thoroughly before generating tests
+- MUST include ALL functions and scenarios from specification
+- THE FILE MUST BE PHYSICALLY SAVED, READABLE, AND EXECUTABLE
+- Tests must be sophisticated, not placeholder stub tests
 
-RETURN FORMAT (JSON only - MUST return the exact testFile path):
+RETURN FORMAT (JSON only - MUST return accurate counts):
 {
   "sourceFile": "${sourceFile}",
   "testFile": "${testFile}",
-  "functionsCount": 1,
-  "testCasesCount": 3,
+  "functionsCount": [ACTUAL_FUNCTION_COUNT],
+  "testCasesCount": [ACTUAL_TEST_CASES_COUNT], 
   "success": true
 }`;
 
@@ -1126,6 +1507,8 @@ RETURN FORMAT (JSON only - MUST return the exact testFile path):
             return {
                 containerId,
                 testGeneration,
+                repoAnalysis,
+                testSpecs: [testSpec],
             };
         } catch (error) {
             logger?.error("❌ Step 2/3: Simple test generation failed", {
@@ -1165,85 +1548,232 @@ RETURN FORMAT (JSON only - MUST return the exact testFile path):
             return {
                 containerId,
                 testGeneration,
+                repoAnalysis,
+                testSpecs: [testSpec],
             };
         }
     },
 });
 
 /**
- * Step 3: Finalize and Summarize (MVP)
+ * Step 3: Finalize with Syntax Validation and Retry Logic (Enhanced MVP)
  * 
- * Simple final step that provides recommendations and summary for the MVP test generation.
+ * Advanced final step that validates test syntax, executes tests, and retries with error feedback if needed.
  */
 const finalizeStep = createStep({
     id: "finalize-step",
     inputSchema: z.object({
         containerId: z.string(),
         testGeneration: TestGenerationResult,
+        repoAnalysis: RepoTestAnalysis,
+        testSpecs: z.array(TestSpecification),
+        retryCount: z.number().optional().default(0),
+        lastError: z.string().optional(),
     }),
     outputSchema: UnitTestResult,
     execute: async ({ inputData, mastra, runId }) => {
-        const { testGeneration } = inputData;
+        const { testGeneration, containerId, repoAnalysis, testSpecs, retryCount = 0, lastError } = inputData;
         const logger = mastra?.getLogger();
+        const maxRetries = 2;
         
-        logger?.info("🎯 Step 3/3: Finalizing MVP test generation", {
+        logger?.info("🔍 Step 3/3: Enhanced finalization with syntax validation and retry logic", {
             step: "3/3",
-            stepName: "Finalize MVP",
+            stepName: "Enhanced Finalize with Validation",
             testFileGenerated: testGeneration.testFiles.length,
-            success: testGeneration.summary.successfulFiles > 0,
+            retryCount,
+            maxRetries,
+            hasLastError: !!lastError,
             type: "WORKFLOW_STEP",
             runId: runId,
         });
 
-        // Generate recommendations based on results
+        // If we have failed files, check if we should retry
+        if (testGeneration.summary.failedFiles > 0 && retryCount < maxRetries && repoAnalysis && testSpecs) {
+            logger?.warn("⚠️ Test generation had failures, initiating retry with error feedback", {
+                step: "3/3",
+                failedFiles: testGeneration.summary.failedFiles,
+                retryCount: retryCount + 1,
+                lastError: lastError?.substring(0, 200),
+                type: "WORKFLOW_STEP",
+                runId: runId,
+            });
+
+            // Prepare retry with error feedback
+            return await retryTestGeneration(containerId, repoAnalysis, testSpecs, retryCount + 1, lastError, mastra, runId, logger);
+        }
+
+        // Phase 1: Syntax and Execution Validation
+        if (testGeneration.summary.successfulFiles > 0) {
+            const testFile = testGeneration.testFiles[0];
+            
+            logger?.info("✅ Phase 1: Syntax and execution validation", {
+                step: "3/3",
+                phase: "validation",
+                testFile: testFile?.testFile,
+                type: "WORKFLOW_STEP",
+                runId: runId,
+            });
+
+            const validationPrompt = `CRITICAL: Validate test file syntax and execution using docker_exec with containerId='${containerId}'.
+
+TASK: Comprehensive test validation and execution check.
+
+TEST FILE TO VALIDATE: ${testFile?.testFile}
+
+🔍 VALIDATION WORKFLOW:
+
+PHASE 1: PROJECT SETUP AND DISCOVERY
+1. Find project directory: docker_exec ls -la /app/ | grep "^d" | grep -v "\\." | awk '{print $NF}' | head -1
+2. Change to project directory: cd /app/PROJECT_DIR
+3. Check if test file exists: docker_exec test -f /app/PROJECT_DIR/${testFile?.testFile} && echo "EXISTS" || echo "MISSING"
+
+PHASE 2: SYNTAX VALIDATION
+4. Check TypeScript syntax: docker_exec cd /app/PROJECT_DIR && npx tsc --noEmit ${testFile?.testFile} 2>&1 || echo "SYNTAX_CHECK_COMPLETE"
+5. Check for import/export errors: docker_exec cd /app/PROJECT_DIR && node -c ${testFile?.testFile?.replace('.ts', '.js')} 2>&1 || echo "IMPORT_CHECK_COMPLETE"
+
+PHASE 3: VITEST EXECUTION ATTEMPT  
+6. Install test dependencies if needed: docker_exec cd /app/PROJECT_DIR && npm list vitest || npm install vitest @types/node --save-dev
+7. Try to run the specific test: docker_exec cd /app/PROJECT_DIR && npm test ${testFile?.testFile} 2>&1 || npx vitest run ${testFile?.testFile} 2>&1 || echo "TEST_EXECUTION_ATTEMPTED"
+
+PHASE 4: COMPREHENSIVE ANALYSIS
+8. Analyze any error patterns from above steps
+9. Check test structure validity
+10. Verify mock configurations are correct
+
+🎯 ANALYSIS CRITERIA:
+- Syntax errors (TypeScript compilation issues)
+- Import/export problems
+- Missing dependencies
+- Mock configuration errors
+- Test framework compatibility
+- Runtime execution errors
+
+RETURN VALIDATION RESULTS (JSON only):
+{
+  "syntaxValid": true|false,
+  "executionSuccessful": true|false,
+  "errorDetails": "[SPECIFIC_ERROR_MESSAGE_IF_ANY]",
+  "needsRetry": true|false,
+  "recommendations": ["[SPECIFIC_FIX_RECOMMENDATIONS]"]
+}`;
+
+            try {
+                const validationResult = await callAgent("unitTestAgent", validationPrompt, z.object({
+                    syntaxValid: z.boolean(),
+                    executionSuccessful: z.boolean(),
+                    errorDetails: z.string().optional(),
+                    needsRetry: z.boolean(),
+                    recommendations: z.array(z.string()),
+                }), 300, runId, logger);
+
+                logger?.info("📊 Validation results received", {
+                    syntaxValid: validationResult.syntaxValid,
+                    executionSuccessful: validationResult.executionSuccessful,
+                    hasErrors: !!validationResult.errorDetails,
+                    needsRetry: validationResult.needsRetry,
+                    type: "WORKFLOW_STEP",
+                    runId: runId,
+                });
+
+                // If validation failed and we can retry, do so
+                if (validationResult.needsRetry && retryCount < maxRetries && validationResult.errorDetails && repoAnalysis && testSpecs) {
+                    logger?.warn("🔄 Validation failed, initiating retry with detailed error feedback", {
+                        step: "3/3",
+                        retryCount: retryCount + 1,
+                        errorDetails: validationResult.errorDetails.substring(0, 200),
+                        type: "WORKFLOW_STEP",
+                        runId: runId,
+                    });
+
+                    return await retryTestGeneration(containerId, repoAnalysis, testSpecs, retryCount + 1, validationResult.errorDetails, mastra, runId, logger);
+                }
+
+                // Update test generation quality based on validation
+                testGeneration.quality.syntaxValid = validationResult.syntaxValid;
+                testGeneration.quality.followsBestPractices = validationResult.syntaxValid && validationResult.executionSuccessful;
+                testGeneration.quality.coverageScore = validationResult.executionSuccessful ? 85 : 50;
+
+            } catch (validationError) {
+                logger?.warn("⚠️ Validation step failed, proceeding with basic assessment", {
+                    step: "3/3",
+                    error: validationError instanceof Error ? validationError.message : 'Unknown error',
+                    type: "WORKFLOW_STEP",
+                    runId: runId,
+                });
+            }
+        }
+
+        // Phase 2: Generate Final Recommendations
         const recommendations = [];
         
-        if (testGeneration.summary.successfulFiles > 0) {
+        if (testGeneration.summary.successfulFiles > 0 && testGeneration.quality.syntaxValid) {
             recommendations.push(
-                `Run the generated test: npm test ${testGeneration.testFiles[0]?.testFile || ''}`,
-                "Verify test passes and coverage is adequate",
+                `✅ Run the validated test: npm test ${testGeneration.testFiles[0]?.testFile || ''}`,
+                "Test file has been syntax-validated and is ready for execution",
                 "Consider expanding to other high-priority modules",
-                "Set up test automation in CI/CD pipeline"
+                "Set up test automation in CI/CD pipeline",
+                "Monitor test coverage and add additional test cases as needed"
+            );
+        } else if (testGeneration.summary.successfulFiles > 0) {
+            recommendations.push(
+                `⚠️ Test file created but may have syntax issues: ${testGeneration.testFiles[0]?.testFile || ''}`,
+                "Review and fix any syntax errors before execution",
+                "Check import statements and dependency mocking",
+                "Verify vitest configuration is correct"
             );
         } else {
             recommendations.push(
-                "Review error logs for test generation failures",
-                "Check source file accessibility and syntax",
-                "Retry with simplified test specifications",
-                "Consider manual test creation as backup"
+                "❌ Test generation failed after retry attempts",
+                "Review error logs for systematic issues",
+                "Check source file accessibility and complexity",
+                "Consider manual test creation as backup",
+                "Verify Docker container has necessary dependencies"
+            );
+        }
+
+        // Add retry-specific recommendations
+        if (retryCount > 0) {
+            recommendations.push(
+                `📊 Completed ${retryCount} retry attempt(s) with error feedback`,
+                "Review the progression of fixes applied during retries",
+                "Consider the error patterns for future test generation improvements"
             );
         }
 
         // Add MVP-specific recommendations
         recommendations.push(
-            "MVP completed - expand to other modules when ready",
-            "Review generated test quality and patterns",
-            "Document testing approach for team consistency"
+            "🎯 Enhanced MVP completed with validation - expand to other modules when ready",
+            "📈 Review generated test quality and validation results",
+            "📝 Document testing approach and validation patterns for team consistency"
         );
 
         const result = testGeneration.summary.successfulFiles > 0
-            ? `MVP test generation successful: ${testGeneration.testFiles[0]?.testFile || 'test file'} created`
-            : "MVP test generation failed - check logs for details";
+            ? testGeneration.quality.syntaxValid 
+                ? `✅ Enhanced MVP test generation successful with validation: ${testGeneration.testFiles[0]?.testFile || 'test file'} created and validated`
+                : `⚠️ MVP test generation completed with syntax warnings: ${testGeneration.testFiles[0]?.testFile || 'test file'} created but needs review`
+            : `❌ Enhanced MVP test generation failed after ${retryCount} retry attempts - check logs for details`;
 
-        logger?.info("✅ Step 3/3: MVP test generation workflow completed", {
+        logger?.info("🏁 Step 3/3: Enhanced MVP test generation workflow completed", {
             step: "3/3",
             success: testGeneration.summary.successfulFiles > 0,
+            syntaxValid: testGeneration.quality.syntaxValid,
             testFile: testGeneration.testFiles[0]?.testFile || 'none',
             functionsCount: testGeneration.summary.totalFunctions,
             testCasesCount: testGeneration.summary.totalTestCases,
             coverageScore: testGeneration.quality.coverageScore,
-                toolCallCount: cliToolMetrics.callCount,
+            toolCallCount: cliToolMetrics.callCount,
+            retryCount,
             type: "WORKFLOW_STEP",
-                runId: runId,
-            });
+            runId: runId,
+        });
 
-            return {
+        return {
             result,
             success: testGeneration.summary.successfulFiles > 0,
-                toolCallCount: cliToolMetrics.callCount,
-                testGeneration,
-                recommendations,
-            };
+            toolCallCount: cliToolMetrics.callCount,
+            testGeneration,
+            recommendations,
+        };
     },
 });
 

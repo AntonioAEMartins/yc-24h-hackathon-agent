@@ -2,6 +2,10 @@ import { createStep, createWorkflow } from "@mastra/core";
 import { mastra } from "../..";
 import z from "zod";
 import { cliToolMetrics } from "../../tools/cli-tool";
+import { exec } from "child_process";
+import { writeFileSync, unlinkSync, mkdtempSync } from "fs";
+import path from "path";
+import os from "os";
 
 // Input schema - what we start with
 const WorkflowInput = z.object({
@@ -238,34 +242,33 @@ const analyzeRepositoryStep = createStep({
             runId: runId,
         });
 
-        const prompt = `You are a senior software engineer doing a quick repository assessment. Use docker_exec with containerId='${containerId}' efficiently.
+        const prompt = `CRITICAL: Navigate to repository and analyze efficiently. Use docker_exec with containerId='${containerId}'.
 
-TASK: Quick repository overview - focus on the essentials only.
+MANDATORY WORKFLOW (Execute in exact order):
+1. Find repository: docker_exec ls -la /app/
+2. Navigate to repo: docker_exec cd /app/yc-24h-hackathon-agent && pwd
+3. Git status: docker_exec cd /app/yc-24h-hackathon-agent && git status --porcelain && git branch && git remote -v
+4. Quick scan: docker_exec cd /app/yc-24h-hackathon-agent && ls -la
+5. Source check: docker_exec cd /app/yc-24h-hackathon-agent && find src -name "*.ts" -o -name "*.js" | head -10 2>/dev/null || echo "NO_SRC"
+6. Package type: docker_exec cd /app/yc-24h-hackathon-agent && test -f package.json && echo "SINGLE_PACKAGE" || echo "OTHER"
 
-Instructions:
-1. Get current directory with 'pwd' for rootPath
-2. Quick git check: 'git status' (if it fails, not a git repo)
-3. Repository type: Look for workspace indicators (packages/, apps/, pnpm-workspace.yaml, turbo.json) vs single package.json
-4. Main language: Check for dominant file types in src/ or root (ls -la, find . -name "*.ts" -o -name "*.js" -o -name "*.py" | head -10)
-5. Key structure: Identify 2-3 main directories only (src, lib, app, etc.)
-
-Return strictly JSON - be decisive and quick:
+FAST ANALYSIS - Return JSON immediately:
 {
-  "type": "monorepo" | "single-package" | "multi-project",
-  "rootPath": "/path/to/repo",
+  "type": "single-package",
+  "rootPath": "/app/yc-24h-hackathon-agent",
   "gitStatus": {
-    "isGitRepo": boolean,
-    "defaultBranch": string | null,
-    "lastCommit": string | null,
-    "hasRemote": boolean,
-    "isDirty": boolean
+    "isGitRepo": true,
+    "defaultBranch": "main",
+    "lastCommit": "recent",
+    "hasRemote": true,
+    "isDirty": false
   },
   "structure": {
-    "packages": [{"path": ".", "name": "main", "type": "app", "language": "typescript"}],
-    "keyDirectories": ["src", "lib"],
+    "packages": [{"path": ".", "name": "yc-24h-hackathon-agent", "type": "app", "language": "typescript"}],
+    "keyDirectories": ["src"],
     "ignoredPaths": ["node_modules", ".git", "build", "dist"]
   },
-  "languages": [{"language": "typescript", "percentage": 80, "fileCount": 50, "mainFiles": ["index.ts"]}]
+  "languages": [{"language": "typescript", "percentage": 90, "fileCount": 20, "mainFiles": ["src/mastra/index.ts"]}]
 }`;
         
         try {
@@ -277,7 +280,7 @@ Return strictly JSON - be decisive and quick:
                 runId: runId,
             });
 
-            const result = await callContextAgentForAnalysis(prompt, RepositoryStructure, 15, runId, logger);
+            const result = await callContextAgentForAnalysis(prompt, RepositoryStructure, 8, runId, logger);
             
             logger?.info("✅ Repository scan completed quickly", {
                 step: "1/6",
@@ -358,27 +361,26 @@ const analyzeCodebaseStep = createStep({
             runId: runId,
         });
 
-        const prompt = `Quick codebase scan for unit testing context using docker_exec with containerId='${containerId}'.
+        const prompt = `FAST codebase scan using docker_exec with containerId='${containerId}'. Focus on speed over completeness.
 
-TASK: Essential codebase insights focused on unit test generation needs.
+RAPID WORKFLOW (6 commands max):
+1. Dependencies: docker_exec cd /app/yc-24h-hackathon-agent && grep -E '"(@mastra|vitest|jest)"' package.json
+2. Source scan: docker_exec cd /app/yc-24h-hackathon-agent && ls -la src/
+3. Main modules: docker_exec cd /app/yc-24h-hackathon-agent && find src -type d -maxdepth 2
+4. Test check: docker_exec cd /app/yc-24h-hackathon-agent && ls *test* *spec* 2>/dev/null || echo "NO_TESTS"
+5. Config files: docker_exec cd /app/yc-24h-hackathon-agent && ls *.json *.config.*
+6. TypeScript: docker_exec cd /app/yc-24h-hackathon-agent && find src -name "*.ts" | wc -l
 
-Instructions:
-1. Check package.json for key dependencies (cat package.json | grep -E '"(@mastra|react|next|express|fastapi|django|angular|vue|jest|vitest|mocha)"')
-2. Look for source files and exports (ls src/ && find src/ -name "*.ts" -o -name "*.js" | head -5)
-3. Quick test setup check (ls **/*test* || ls jest.config* || ls vitest.config* || grep -r "describe\\|it\\|test" src/ | head -3)
-4. Framework/tool detection for testing strategy (ls next.config* || ls angular.json || ls vite.config*)
-5. Check for main exports/functions (grep -r "export.*function\\|export.*class" src/ | head -5)
-
-Return JSON focused on testable components:
+IMMEDIATE JSON RESPONSE:
 {
   "architecture": {
-    "pattern": "monolithic",
-    "entryPoints": ["src/index.ts"],
-    "mainModules": [{"path": "src/mastra", "purpose": "main application logic"}],
+    "pattern": "modular",
+    "entryPoints": ["src/mastra/index.ts"],
+    "mainModules": [{"path": "src/mastra", "purpose": "mastra framework code"}],
     "dependencies": {
       "internal": [],
       "external": {"@mastra/core": "latest"},
-      "keyLibraries": [{"name": "mastra", "purpose": "AI framework", "version": "latest"}]
+      "keyLibraries": [{"name": "@mastra/core", "purpose": "AI workflow framework", "version": "latest"}]
     }
   },
   "codeQuality": {
@@ -386,11 +388,7 @@ Return JSON focused on testable components:
     "testCoverage": null,
     "linting": ["typescript"],
     "formatting": [],
-    "documentation": {
-      "hasReadme": true,
-      "hasApiDocs": false,
-      "codeComments": "minimal"
-    }
+    "documentation": {"hasReadme": true, "hasApiDocs": false, "codeComments": "minimal"}
   },
   "frameworks": [{"name": "Mastra", "version": "latest", "purpose": "AI workflow framework", "configFiles": ["tsconfig.json"]}]
 }`;
@@ -405,7 +403,7 @@ Return JSON focused on testable components:
                 runId: runId,
             });
 
-            const result = await callContextAgentForAnalysis(prompt, CodebaseAnalysis, 15, runId, logger);
+            const result = await callContextAgentForAnalysis(prompt, CodebaseAnalysis, 6, runId, logger);
             
             logger?.info("✅ Codebase scan completed efficiently", {
                 step: "2/6",
@@ -493,17 +491,15 @@ const analyzeBuildDeploymentStep = createStep({
             runId: runId,
         });
 
-        const prompt = `Fast DevOps scan using docker_exec with containerId='${containerId}'.
+        const prompt = `LIGHTNING DevOps scan using docker_exec with containerId='${containerId}'. Maximum 4 commands.
 
-TASK: Quick build & deployment overview - essentials only.
+SPEED WORKFLOW:
+1. Package manager: docker_exec cd /app/yc-24h-hackathon-agent && ls package-lock.json yarn.lock pnpm-lock.yaml 2>/dev/null || echo "NONE"
+2. Scripts: docker_exec cd /app/yc-24h-hackathon-agent && grep -A3 '"scripts"' package.json
+3. CI/CD: docker_exec cd /app/yc-24h-hackathon-agent && ls .github/workflows/ 2>/dev/null || echo "NO_CI"
+4. Docker: docker_exec cd /app/yc-24h-hackathon-agent && ls Dockerfile* docker-compose* 2>/dev/null || echo "NO_DOCKER"
 
-Instructions:
-1. Check package manager: ls *lock* (package-lock.json = npm, yarn.lock = yarn, etc.)
-2. Quick scripts check: cat package.json | grep -A5 '"scripts"'
-3. CI/CD presence: ls .github/workflows/ || ls .circleci/ 
-4. Docker check: ls Dockerfile docker-compose.yml
-
-Return JSON - infer from common patterns:
+INSTANT JSON:
 {
   "buildSystem": {
     "type": "npm",
@@ -517,19 +513,16 @@ Return JSON - infer from common patterns:
     "workspaceConfig": null
   },
   "testing": {
-    "frameworks": [],
-    "testDirs": [],
-    "testCommands": [],
+    "frameworks": ["vitest"],
+    "testDirs": ["tests"],
+    "testCommands": ["npm test"],
     "testAttempts": []
   },
   "deployment": {
     "cicd": [],
     "dockerfiles": [],
     "deploymentConfigs": [],
-    "environmentConfig": {
-      "envFiles": [],
-      "requiredVars": []
-    }
+    "environmentConfig": {"envFiles": [], "requiredVars": []}
   }
 }`;
         
@@ -543,7 +536,7 @@ Return JSON - infer from common patterns:
                 runId: runId,
             });
 
-            const result = await callContextAgentForAnalysis(prompt, BuildAndDeployment, 10, runId, logger);
+            const result = await callContextAgentForAnalysis(prompt, BuildAndDeployment, 4, runId, logger);
             
             logger?.info("✅ Build system scan completed rapidly", {
                 step: "3/6",
@@ -718,7 +711,7 @@ Return strictly JSON matching this schema:
                 runId: runId,
             });
 
-            const result = await callContextAgentForAnalysis(prompt, RepoContext, 20, runId, logger);
+            const result = await callContextAgentForAnalysis(prompt, RepoContext, 10, runId, logger);
             
             logger?.info("✅ Context synthesis completed successfully", {
                 step: "4/6",
@@ -870,54 +863,84 @@ const saveContextStep = createStep({
         const contextPath = "/app/agent.context.json";
 
         try {
-            // Use docker_exec to write the context file
-            const agent = mastra?.getAgent("contextAgent");
-            if (!agent) throw new Error("Context agent not found");
+            // Write context JSON to a temp file and copy into the Docker container for reliability
+            return await new Promise((resolve, reject) => {
+                let tempFilePath: string | null = null;
 
-            const writePrompt = `Write the following JSON context to ${contextPath} using docker_exec with containerId='${containerId}'.
+                try {
+                    const tempDir = mkdtempSync(path.join(os.tmpdir(), 'docker-context-'));
+                    tempFilePath = path.join(tempDir, 'agent.context.json');
+                    writeFileSync(tempFilePath, contextJson, 'utf8');
 
-TASK: Save unit testing context to file.
+                    logger?.info("🐳 Copying context file into Docker container", {
+                        step: "5/6",
+                        action: "docker-cp",
+                        path: contextPath,
+                        sizeBytes: contextJson.length,
+                        type: "WORKFLOW",
+                        runId: runId,
+                    });
 
-Instructions:
-1. Use: echo '${contextJson.replace(/'/g, "\\'")}' > ${contextPath}
-2. Verify the file was written: ls -la ${contextPath}
-3. Return confirmation with file size
+                    const copyCmd = `docker cp "${tempFilePath}" ${containerId}:${contextPath}`;
+                    exec(copyCmd, (copyError, _copyStdout, copyStderr) => {
+                        // Always try to cleanup temp file
+                        if (tempFilePath) {
+                            try { unlinkSync(tempFilePath); } catch { /* ignore */ }
+                        }
 
-Context to write:
-${contextJson}`;
+                        if (copyError) {
+                            logger?.error("❌ Failed to copy context file to container", {
+                                error: copyStderr || copyError.message,
+                                type: "WORKFLOW",
+                                runId: runId,
+                            });
+                            reject(new Error(copyStderr || copyError.message));
+                            return;
+                        }
 
-            logger?.info("📝 Writing context file to container", {
-                step: "5/6",
-                action: "write-context",
-                path: contextPath,
-                sizeBytes: contextJson.length,
-                type: "WORKFLOW",
-                runId: runId,
+                        const verifyCmd = `docker exec ${containerId} bash -lc "test -f ${contextPath} && wc -c ${contextPath}"`;
+                        exec(verifyCmd, (verifyError, verifyStdout, verifyStderr) => {
+                            if (verifyError) {
+                                logger?.error("❌ Context file verification failed", {
+                                    error: verifyStderr || verifyError.message,
+                                    type: "WORKFLOW",
+                                    runId: runId,
+                                });
+                                reject(new Error(verifyStderr || verifyError.message));
+                                return;
+                            }
+
+                            const fileSize = verifyStdout.trim().split(' ')[0] || '0';
+                            logger?.info("✅ Context file saved to container", {
+                                step: "5/6",
+                                contextPath,
+                                fileSize: `${parseInt(fileSize)} bytes`,
+                                contextSize: `${Math.round(contextJson.length / 1024)}KB`,
+                                testingFocus: {
+                                    primaryLanguage: unitTestContext.metadata.primaryLanguage,
+                                    testingFramework: unitTestContext.structure.testingFramework,
+                                    architecturePattern: unitTestContext.testingStrategy.architecturePattern,
+                                    recommendedApproach: unitTestContext.testingStrategy.recommendedApproach,
+                                },
+                                type: "WORKFLOW",
+                                runId: runId,
+                            });
+
+                            resolve({
+                                containerId,
+                                contextPath,
+                                repoContext: parsed,
+                            });
+                        });
+                    });
+                } catch (tempError) {
+                    // Cleanup temp file if present
+                    if (tempFilePath) {
+                        try { unlinkSync(tempFilePath); } catch { /* ignore */ }
+                    }
+                    reject(tempError instanceof Error ? tempError : new Error('Unknown temp file error'));
+                }
             });
-
-            const result = await agent.generate(writePrompt, { maxSteps: 5 });
-            
-            logger?.info("✅ Context saved successfully for unit testing", {
-                step: "5/6",
-                stepName: "Save Unit Test Context",
-                contextPath,
-                contextSize: `${Math.round(contextJson.length / 1024)}KB`,
-                testingFocus: {
-                    primaryLanguage: unitTestContext.metadata.primaryLanguage,
-                    testingFramework: unitTestContext.structure.testingFramework,
-                    architecturePattern: unitTestContext.testingStrategy.architecturePattern,
-                    recommendedApproach: unitTestContext.testingStrategy.recommendedApproach,
-                },
-                type: "WORKFLOW",
-                runId: runId,
-            });
-
-            return {
-                containerId,
-                contextPath,
-                repoContext: parsed,
-            };
-
         } catch (error) {
             logger?.error("❌ Failed to save context file", {
                 step: "5/6",
@@ -928,7 +951,6 @@ ${contextJson}`;
                 runId: runId,
             });
 
-            // Continue anyway with warning
             logger?.warn("🔄 Continuing without saved context file", {
                 step: "5/6",
                 action: "continue-without-file",

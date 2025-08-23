@@ -1,6 +1,9 @@
 import { createTool } from "@mastra/core";
 import z from "zod";
 import { cliToolMetrics } from "./cli-tool";
+import { writeFileSync, unlinkSync, mkdtempSync } from "fs";
+import os from "os";
+import path from "path";
 
 export const fileOperationsTool = createTool({
     id: "file_operations",
@@ -41,9 +44,53 @@ export const fileOperationsTool = createTool({
                 if (!content) {
                     throw new Error("content is required for write operation");
                 }
-                // Escape content for shell
-                const escapedContent = content.replace(/'/g, "'\"'\"'");
-                command = `docker exec ${containerId} bash -lc "echo '${escapedContent}' > ${JSON.stringify(filePath)}"`;
+                // Robust write: create temp file locally and docker cp into container
+                return await new Promise((resolve, reject) => {
+                    let tempFilePath: string | null = null;
+                    try {
+                        const tempDir = mkdtempSync(path.join(os.tmpdir(), 'docker-fileop-'));
+                        tempFilePath = path.join(tempDir, 'tmp-write-file');
+                        writeFileSync(tempFilePath, content, 'utf8');
+
+                        const dirInContainer = path.posix.dirname(filePath);
+                        const mkdirCmd = `docker exec ${containerId} bash -lc "mkdir -p ${JSON.stringify(dirInContainer)}"`;
+                        exec(mkdirCmd, (mkErr, _mkOut, mkErrOut) => {
+                            if (mkErr) {
+                                try { if (tempFilePath) unlinkSync(tempFilePath); } catch {}
+                                reject(new Error(mkErrOut || mkErr.message));
+                                return;
+                            }
+
+                            const cpCmd = `docker cp "${tempFilePath}" ${containerId}:${JSON.stringify(filePath)}`;
+                            exec(cpCmd, (cpErr, _cpOut, cpErrOut) => {
+                                try { if (tempFilePath) unlinkSync(tempFilePath); } catch {}
+                                if (cpErr) {
+                                    reject(new Error(cpErrOut || cpErr.message));
+                                    return;
+                                }
+
+                                const verifyCmd = `docker exec ${containerId} bash -lc "test -f ${JSON.stringify(filePath)} && wc -c ${JSON.stringify(filePath)}"`;
+                                exec(verifyCmd, (vErr, vOut, vErrOut) => {
+                                    if (vErr) {
+                                        reject(new Error(vErrOut || vErr.message));
+                                        return;
+                                    }
+                                    resolve({
+                                        operation,
+                                        filePath,
+                                        targetPath,
+                                        success: true,
+                                        output: vOut.trim(),
+                                        timestamp: new Date().toISOString(),
+                                    });
+                                });
+                            });
+                        });
+                    } catch (tempErr) {
+                        try { if (tempFilePath) unlinkSync(tempFilePath); } catch {}
+                        reject(tempErr instanceof Error ? tempErr : new Error('Unknown write error'));
+                    }
+                });
                 break;
                 
             case "create_dir":
