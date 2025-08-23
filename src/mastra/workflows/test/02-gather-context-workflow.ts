@@ -6,6 +6,9 @@ import { exec } from "child_process";
 import { writeFileSync, unlinkSync, mkdtempSync } from "fs";
 import path from "path";
 import os from "os";
+import { notifyStepStatus } from "../../tools/alert-notifier";
+
+const ALERTS_ONLY = (process.env.ALERTS_ONLY === 'true') || (process.env.LOG_MODE === 'alerts_only') || (process.env.MASTRA_LOG_MODE === 'alerts_only');
 
 // Input schema - what we start with
 const WorkflowInput = z.object({
@@ -144,13 +147,13 @@ async function callContextAgentForAnalysis<T>(
     const agent = mastra?.getAgent("contextAgent");
     if (!agent) throw new Error("Context agent not found");
     
-    logger?.debug("🤖 Invoking context agent", {
+    /* logger?.debug("🤖 Invoking context agent", {
         promptLength: prompt.length,
         maxSteps,
         schemaName: (schema as any)._def?.typeName || 'unknown',
         type: "AGENT_CALL",
         runId: runId,
-    });
+    }); */
 
     const startTime = Date.now();
     const result: any = await agent.generate(prompt, { 
@@ -162,37 +165,37 @@ async function callContextAgentForAnalysis<T>(
     
     const text = (result?.text || "{}").toString();
     
-    logger?.debug("📤 Agent response received", {
+    /* logger?.debug("📤 Agent response received", {
         responseLength: text.length,
         duration: `${duration}ms`,
         type: "AGENT_RESPONSE",
         runId: runId,
-    });
+    }); */
     
     // Try to extract JSON from response if it's wrapped in markdown or explanatory text
     let jsonText = text;
     const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/```\s*([\s\S]*?)\s*```/);
     if (jsonMatch) {
         jsonText = jsonMatch[1];
-        logger?.debug("📋 Extracted JSON from markdown", {
+        /* logger?.debug("📋 Extracted JSON from markdown", {
             originalLength: text.length,
             extractedLength: jsonText.length,
             type: "JSON_EXTRACTION",
             runId: runId,
-        });
+        }); */
     } else {
         // Look for JSON object boundaries
         const start = text.indexOf('{');
         const end = text.lastIndexOf('}');
         if (start !== -1 && end !== -1 && end > start) {
             jsonText = text.substring(start, end + 1);
-            logger?.debug("📋 Extracted JSON from boundaries", {
+            /* logger?.debug("📋 Extracted JSON from boundaries", {
                 originalLength: text.length,
                 extractedLength: jsonText.length,
                 boundaries: { start, end },
                 type: "JSON_EXTRACTION",
                 runId: runId,
-            });
+            }); */
         }
     }
     
@@ -200,21 +203,21 @@ async function callContextAgentForAnalysis<T>(
         const parsed = JSON.parse(jsonText);
         const validated = schema.parse(parsed);
         
-        logger?.debug("✅ JSON parsing and validation successful", {
+        /* logger?.debug("✅ JSON parsing and validation successful", {
             jsonLength: jsonText.length,
             validatedKeys: typeof validated === 'object' && validated !== null ? Object.keys(validated as object).length : 0,
             type: "JSON_VALIDATION",
             runId: runId,
-        });
+        }); */
         
         return validated;
     } catch (error) {
-        logger?.error("❌ JSON parsing or validation failed", {
+        /* logger?.error("❌ JSON parsing or validation failed", {
             error: error instanceof Error ? error.message : 'Unknown error',
             jsonText: jsonText.substring(0, 500), // First 500 chars for debugging
             type: "JSON_ERROR",
             runId: runId,
-        });
+        }); */
         
         throw new Error(`JSON parsing failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
@@ -230,9 +233,17 @@ export const analyzeRepositoryStep = createStep({
     }),
     execute: async ({ inputData, mastra, runId }) => {
         const { containerId } = inputData;
-        const logger = mastra?.getLogger();
+        const logger = ALERTS_ONLY ? null : mastra?.getLogger();
+        await notifyStepStatus({
+            stepId: "analyze-repository-step",
+            status: "starting",
+            runId,
+            containerId,
+            title: "Analyze repository",
+            subtitle: "Quick repository scan starting",
+        });
         
-        logger?.info("🔍 Starting quick repository scan", {
+        /* logger?.info("🔍 Starting quick repository scan", {
             step: "1/6", 
             stepName: "Repository Quick Scan",
             containerId,
@@ -240,7 +251,7 @@ export const analyzeRepositoryStep = createStep({
             startTime: new Date().toISOString(),
             type: "WORKFLOW",
             runId: runId,
-        });
+        }); */
 
         const prompt = `CRITICAL: Navigate to repository and analyze efficiently. Use docker_exec with containerId='${containerId}'.
 
@@ -272,17 +283,17 @@ FAST ANALYSIS - Return JSON immediately:
 }`;
         
         try {
-            logger?.info("🤖 Quick repository assessment call", {
+            /* logger?.info("🤖 Quick repository assessment call", {
                 step: "1/6",
                 action: "agent-call",
                 agentType: "contextAgent",
                 type: "WORKFLOW",
                 runId: runId,
-            });
+            }); */
 
             const result = await callContextAgentForAnalysis(prompt, RepositoryStructure, 8, runId, logger);
             
-            logger?.info("✅ Repository scan completed quickly", {
+            /* logger?.info("✅ Repository scan completed quickly", {
                 step: "1/6",
                 stepName: "Repository Analysis",
                 duration: "completed",
@@ -292,6 +303,17 @@ FAST ANALYSIS - Return JSON immediately:
                 packageCount: result.structure.packages.length,
                 type: "WORKFLOW",
                 runId: runId,
+            }); */
+
+            await notifyStepStatus({
+                stepId: "analyze-repository-step",
+                status: "completed",
+                runId,
+                containerId,
+                title: "Analyze repository completed",
+                subtitle: `Type: ${result.type}`,
+                toolCallCount: cliToolMetrics.callCount,
+                metadata: { packages: result.structure.packages.length },
             });
 
             return {
@@ -299,21 +321,32 @@ FAST ANALYSIS - Return JSON immediately:
                 repository: result,
             };
         } catch (error) {
-            logger?.error("❌ Repository analysis failed", {
+            /* logger?.error("❌ Repository analysis failed", {
                 step: "1/6",
                 stepName: "Repository Analysis",
                 error: error instanceof Error ? error.message : 'Unknown error',
                 containerId,
                 type: "WORKFLOW",
                 runId: runId,
+            }); */
+
+            await notifyStepStatus({
+                stepId: "analyze-repository-step",
+                status: "failed",
+                runId,
+                containerId,
+                title: "Analyze repository failed",
+                subtitle: error instanceof Error ? error.message : 'Unknown error',
+                level: 'error',
+                toolCallCount: cliToolMetrics.callCount,
             });
 
-            logger?.warn("🔄 Using fallback repository structure", {
+            /* logger?.warn("🔄 Using fallback repository structure", {
                 step: "1/6",
                 action: "fallback",
                 type: "WORKFLOW",
                 runId: runId,
-            });
+            }); */
 
             // Return minimal fallback structure
             return {
@@ -350,16 +383,24 @@ export const analyzeCodebaseStep = createStep({
     }),
     execute: async ({ inputData, mastra, runId }) => {
         const { containerId } = inputData;
-        const logger = mastra?.getLogger();
+        const logger = ALERTS_ONLY ? null : mastra?.getLogger();
+        await notifyStepStatus({
+            stepId: "analyze-codebase-step",
+            status: "starting",
+            runId,
+            containerId,
+            title: "Analyze codebase",
+            subtitle: "Focused codebase scan starting",
+        });
         
-        logger?.info("📊 Starting focused codebase scan", {
+        /* logger?.info("📊 Starting focused codebase scan", {
             step: "2/6",
             stepName: "Codebase Analysis",
             containerId,
             startTime: new Date().toISOString(),
             type: "WORKFLOW",
             runId: runId,
-        });
+        }); */
 
         const prompt = `FAST codebase scan using docker_exec with containerId='${containerId}'. Focus on speed over completeness.
 
@@ -394,18 +435,18 @@ IMMEDIATE JSON RESPONSE:
 }`;
         
         try {
-            logger?.info("🔬 Quick dependency and framework scan", {
+            /* logger?.info("🔬 Quick dependency and framework scan", {
                 step: "2/6",
                 action: "agent-call",
                 agentType: "contextAgent",
                 focus: "architecture and dependencies",
                 type: "WORKFLOW",
                 runId: runId,
-            });
+            }); */
 
             const result = await callContextAgentForAnalysis(prompt, CodebaseAnalysis, 6, runId, logger);
             
-            logger?.info("✅ Codebase scan completed efficiently", {
+            /* logger?.info("✅ Codebase scan completed efficiently", {
                 step: "2/6",
                 stepName: "Codebase Analysis",
                 duration: "completed",
@@ -416,6 +457,16 @@ IMMEDIATE JSON RESPONSE:
                 keyLibrariesCount: result.architecture.dependencies.keyLibraries.length,
                 type: "WORKFLOW",
                 runId: runId,
+            }); */
+
+            await notifyStepStatus({
+                stepId: "analyze-codebase-step",
+                status: "completed",
+                runId,
+                containerId,
+                title: "Analyze codebase completed",
+                subtitle: `Frameworks: ${result.frameworks.length}`,
+                toolCallCount: cliToolMetrics.callCount,
             });
 
             return {
@@ -423,21 +474,32 @@ IMMEDIATE JSON RESPONSE:
                 codebase: result,
             };
         } catch (error) {
-            logger?.error("❌ Codebase analysis failed", {
+            /* logger?.error("❌ Codebase analysis failed", {
                 step: "2/6",
                 stepName: "Codebase Analysis",
                 error: error instanceof Error ? error.message : 'Unknown error',
                 containerId,
                 type: "WORKFLOW",
                 runId: runId,
+            }); */
+
+            await notifyStepStatus({
+                stepId: "analyze-codebase-step",
+                status: "failed",
+                runId,
+                containerId,
+                title: "Analyze codebase failed",
+                subtitle: error instanceof Error ? error.message : 'Unknown error',
+                level: 'error',
+                toolCallCount: cliToolMetrics.callCount,
             });
 
-            logger?.warn("🔄 Using fallback codebase structure", {
+            /* logger?.warn("🔄 Using fallback codebase structure", {
                 step: "2/6",
                 action: "fallback",
                 type: "WORKFLOW",
                 runId: runId,
-            });
+            }); */
 
             return {
                 containerId,
@@ -480,16 +542,24 @@ export const analyzeBuildDeploymentStep = createStep({
     }),
     execute: async ({ inputData, mastra, runId }) => {
         const { containerId } = inputData;
-        const logger = mastra?.getLogger();
+        const logger = ALERTS_ONLY ? null : mastra?.getLogger();
+        await notifyStepStatus({
+            stepId: "analyze-build-deployment-step",
+            status: "starting",
+            runId,
+            containerId,
+            title: "Analyze build & deployment",
+            subtitle: "DevOps scan starting",
+        });
         
-        logger?.info("🏗️ Starting fast build system scan", {
+        /* logger?.info("🏗️ Starting fast build system scan", {
             step: "3/6",
             stepName: "Build & Deployment Analysis",
             containerId,
             startTime: new Date().toISOString(),
             type: "WORKFLOW",
             runId: runId,
-        });
+        }); */
 
         const prompt = `LIGHTNING DevOps scan using docker_exec with containerId='${containerId}'. Maximum 4 commands.
 
@@ -527,18 +597,18 @@ INSTANT JSON:
 }`;
         
         try {
-            logger?.info("🚀 Quick build and deployment check", {
+            /* logger?.info("🚀 Quick build and deployment check", {
                 step: "3/6",
                 action: "agent-call",
                 agentType: "contextAgent",
                 focus: "DevOps and deployment",
                 type: "WORKFLOW",
                 runId: runId,
-            });
+            }); */
 
             const result = await callContextAgentForAnalysis(prompt, BuildAndDeployment, 4, runId, logger);
             
-            logger?.info("✅ Build system scan completed rapidly", {
+            /* logger?.info("✅ Build system scan completed rapidly", {
                 step: "3/6",
                 stepName: "Build & Deployment Analysis",
                 duration: "completed",
@@ -550,6 +620,16 @@ INSTANT JSON:
                 buildAttempts: result.buildSystem.buildAttempts.length,
                 type: "WORKFLOW",
                 runId: runId,
+            }); */
+
+            await notifyStepStatus({
+                stepId: "analyze-build-deployment-step",
+                status: "completed",
+                runId,
+                containerId,
+                title: "Analyze build & deployment completed",
+                subtitle: `Build system: ${result.buildSystem.type || 'unknown'}`,
+                toolCallCount: cliToolMetrics.callCount,
             });
 
             return {
@@ -557,21 +637,32 @@ INSTANT JSON:
                 buildDeploy: result,
             };
         } catch (error) {
-            logger?.error("❌ Build and deployment analysis failed", {
+            /* logger?.error("❌ Build and deployment analysis failed", {
                 step: "3/6",
                 stepName: "Build & Deployment Analysis",
                 error: error instanceof Error ? error.message : 'Unknown error',
                 containerId,
                 type: "WORKFLOW",
                 runId: runId,
+            }); */
+
+            await notifyStepStatus({
+                stepId: "analyze-build-deployment-step",
+                status: "failed",
+                runId,
+                containerId,
+                title: "Analyze build & deployment failed",
+                subtitle: error instanceof Error ? error.message : 'Unknown error',
+                level: 'error',
+                toolCallCount: cliToolMetrics.callCount,
             });
 
-            logger?.warn("🔄 Using fallback build deployment structure", {
+            /* logger?.warn("🔄 Using fallback build deployment structure", {
                 step: "3/6",
                 action: "fallback",
                 type: "WORKFLOW",
                 runId: runId,
-            });
+            }); */
 
             return {
                 containerId,
@@ -634,9 +725,17 @@ export const synthesizeContextStep = createStep({
         const codebase = inputData["analyze-codebase-step"].codebase;
         const buildDeploy = inputData["analyze-build-deployment-step"].buildDeploy;
         const containerId = inputData["analyze-repository-step"].containerId;
-        const logger = mastra?.getLogger();
+        const logger = ALERTS_ONLY ? null : mastra?.getLogger();
+        await notifyStepStatus({
+            stepId: "synthesize-context-step",
+            status: "starting",
+            runId,
+            containerId,
+            title: "Synthesize context",
+            subtitle: "Generating insights and executive summary",
+        });
         
-        logger?.info("🧠 Starting context synthesis and insights generation", {
+        /* logger?.info("🧠 Starting context synthesis and insights generation", {
             step: "4/6",
             stepName: "Context Synthesis",
             repositoryType: repository.type,
@@ -651,7 +750,7 @@ export const synthesizeContextStep = createStep({
             startTime: new Date().toISOString(),
             type: "WORKFLOW",
             runId: runId,
-        });
+        }); */
         
         const prompt = `You are a senior technical lead providing an executive summary and insights about a codebase.
 
@@ -702,18 +801,18 @@ Return strictly JSON matching this schema:
 }`;
         
         try {
-            logger?.info("💡 Generating insights and executive summary", {
+            /* logger?.info("💡 Generating insights and executive summary", {
                 step: "4/6",
                 action: "agent-call",
                 agentType: "contextAgent",
                 focus: "technical leadership insights",
                 type: "WORKFLOW",
                 runId: runId,
-            });
+            }); */
 
             const result = await callContextAgentForAnalysis(prompt, RepoContext, 10, runId, logger);
             
-            logger?.info("✅ Context synthesis completed successfully", {
+            /* logger?.info("✅ Context synthesis completed successfully", {
                 step: "4/6",
                 stepName: "Context Synthesis",
                 duration: "completed",
@@ -729,24 +828,45 @@ Return strictly JSON matching this schema:
                 confidence: result.confidence,
                 type: "WORKFLOW",
                 runId: runId,
+            }); */
+
+            await notifyStepStatus({
+                stepId: "synthesize-context-step",
+                status: "completed",
+                runId,
+                containerId,
+                title: "Synthesize context completed",
+                subtitle: `Summary length: ${result.executiveSummary.length}`,
+                toolCallCount: cliToolMetrics.callCount,
             });
 
             return { ...result, containerId };
         } catch (error) {
-            logger?.error("❌ Context synthesis failed", {
+            /* logger?.error("❌ Context synthesis failed", {
                 step: "4/6",
                 stepName: "Context Synthesis",
                 error: error instanceof Error ? error.message : 'Unknown error',
                 type: "WORKFLOW",
                 runId: runId,
+            }); */
+
+            await notifyStepStatus({
+                stepId: "synthesize-context-step",
+                status: "failed",
+                runId,
+                containerId,
+                title: "Synthesize context failed",
+                subtitle: error instanceof Error ? error.message : 'Unknown error',
+                level: 'error',
+                toolCallCount: cliToolMetrics.callCount,
             });
 
-            logger?.warn("🔄 Using fallback insights and summary", {
+            /* logger?.warn("🔄 Using fallback insights and summary", {
                 step: "4/6",
                 action: "fallback",
                 type: "WORKFLOW",
                 runId: runId,
-            });
+            }); */
 
             return {
                 containerId,
@@ -788,15 +908,23 @@ export const saveContextStep = createStep({
         repoContext: RepoContext,
     }),
     execute: async ({ inputData, mastra, runId }) => {
-        const logger = mastra?.getLogger();
+        const logger = ALERTS_ONLY ? null : mastra?.getLogger();
+        await notifyStepStatus({
+            stepId: "save-context-step",
+            status: "starting",
+            runId,
+            containerId: inputData.containerId,
+            title: "Save unit test context",
+            subtitle: "Writing agent.context.json",
+        });
         
-        logger?.info("💾 Saving context for unit test generation", {
+        /* logger?.info("💾 Saving context for unit test generation", {
             step: "5/6",
             stepName: "Save Unit Test Context",
             startTime: new Date().toISOString(),
             type: "WORKFLOW",
             runId: runId,
-        });
+        }); */
 
         const { containerId, ...repoContextData } = inputData;
         const parsed = RepoContext.parse(repoContextData);
@@ -872,14 +1000,14 @@ export const saveContextStep = createStep({
                     tempFilePath = path.join(tempDir, 'agent.context.json');
                     writeFileSync(tempFilePath, contextJson, 'utf8');
 
-                    logger?.info("🐳 Copying context file into Docker container", {
+                    /* logger?.info("🐳 Copying context file into Docker container", {
                         step: "5/6",
                         action: "docker-cp",
                         path: contextPath,
                         sizeBytes: contextJson.length,
                         type: "WORKFLOW",
                         runId: runId,
-                    });
+                    }); */
 
                     const copyCmd = `docker cp "${tempFilePath}" ${containerId}:${contextPath}`;
                     exec(copyCmd, (copyError, _copyStdout, copyStderr) => {
@@ -889,11 +1017,11 @@ export const saveContextStep = createStep({
                         }
 
                         if (copyError) {
-                            logger?.error("❌ Failed to copy context file to container", {
+                            /* logger?.error("❌ Failed to copy context file to container", {
                                 error: copyStderr || copyError.message,
                                 type: "WORKFLOW",
                                 runId: runId,
-                            });
+                            }); */
                             reject(new Error(copyStderr || copyError.message));
                             return;
                         }
@@ -901,17 +1029,17 @@ export const saveContextStep = createStep({
                         const verifyCmd = `docker exec ${containerId} bash -lc "test -f ${contextPath} && wc -c ${contextPath}"`;
                         exec(verifyCmd, (verifyError, verifyStdout, verifyStderr) => {
                             if (verifyError) {
-                                logger?.error("❌ Context file verification failed", {
+                                /* logger?.error("❌ Context file verification failed", {
                                     error: verifyStderr || verifyError.message,
                                     type: "WORKFLOW",
                                     runId: runId,
-                                });
+                                }); */
                                 reject(new Error(verifyStderr || verifyError.message));
                                 return;
                             }
 
                             const fileSize = verifyStdout.trim().split(' ')[0] || '0';
-                            logger?.info("✅ Context file saved to container", {
+                            /* logger?.info("✅ Context file saved to container", {
                                 step: "5/6",
                                 contextPath,
                                 fileSize: `${parseInt(fileSize)} bytes`,
@@ -924,6 +1052,17 @@ export const saveContextStep = createStep({
                                 },
                                 type: "WORKFLOW",
                                 runId: runId,
+                            }); */
+
+                            notifyStepStatus({
+                                stepId: "save-context-step",
+                                status: "completed",
+                                runId,
+                                containerId,
+                                contextPath,
+                                title: "Saved unit test context",
+                                subtitle: `Path: ${contextPath}`,
+                                toolCallCount: cliToolMetrics.callCount,
                             });
 
                             resolve({
@@ -942,20 +1081,32 @@ export const saveContextStep = createStep({
                 }
             });
         } catch (error) {
-            logger?.error("❌ Failed to save context file", {
+            /* logger?.error("❌ Failed to save context file", {
                 step: "5/6",
                 stepName: "Save Unit Test Context",
                 error: error instanceof Error ? error.message : 'Unknown error',
                 contextPath,
                 type: "WORKFLOW",
                 runId: runId,
-            });
+            }); */
 
-            logger?.warn("🔄 Continuing without saved context file", {
+            /* logger?.warn("🔄 Continuing without saved context file", {
                 step: "5/6",
                 action: "continue-without-file",
                 type: "WORKFLOW",
                 runId: runId,
+            }); */
+
+            await notifyStepStatus({
+                stepId: "save-context-step",
+                status: "failed",
+                runId,
+                containerId: inputData.containerId,
+                contextPath,
+                title: "Save unit test context failed",
+                subtitle: error instanceof Error ? error.message : 'Unknown error',
+                level: 'error',
+                toolCallCount: cliToolMetrics.callCount,
             });
 
             return {
@@ -983,21 +1134,29 @@ export const validateAndReturnStep = createStep({
         repoContext: RepoContext,
     }),
     execute: async ({ inputData, mastra, runId }) => {
-        const logger = mastra?.getLogger();
+        const logger = ALERTS_ONLY ? null : mastra?.getLogger();
+        await notifyStepStatus({
+            stepId: "validate-and-return-step",
+            status: "starting",
+            runId,
+            containerId: inputData.containerId,
+            title: "Validate and summarize",
+            subtitle: "Final validation starting",
+        });
         
-        logger?.info("🔍 Starting final validation and summary", {
+        /* logger?.info("🔍 Starting final validation and summary", {
             step: "6/6",
             stepName: "Validation & Summary",
             startTime: new Date().toISOString(),
             type: "WORKFLOW",
             runId: runId,
-        });
+        }); */
 
         try {
             const { containerId, contextPath, repoContext } = inputData;
             const parsed = RepoContext.parse(repoContext);
             
-            logger?.info("📋 Workflow execution summary", {
+            /* logger?.info("📋 Workflow execution summary", {
                 step: "6/6",
                 stepName: "Validation & Summary",
                 totalToolCalls: cliToolMetrics.callCount,
@@ -1021,9 +1180,9 @@ export const validateAndReturnStep = createStep({
                 },
                 type: "WORKFLOW",
                 runId: runId,
-            });
+            }); */
 
-            logger?.info("✅ Repository context analysis completed successfully", {
+            /* logger?.info("✅ Repository context analysis completed successfully", {
                 step: "6/6",
                 stepName: "Validation & Summary",
                 duration: "completed",
@@ -1032,6 +1191,16 @@ export const validateAndReturnStep = createStep({
                 readyForUnitTests: true,
                 type: "WORKFLOW",
                 runId: runId,
+            }); */
+
+            await notifyStepStatus({
+                stepId: "validate-and-return-step",
+                status: "completed",
+                runId,
+                containerId: inputData.containerId,
+                title: "Validation completed",
+                subtitle: "Context ready for unit tests",
+                toolCallCount: cliToolMetrics.callCount,
             });
 
             return {
@@ -1042,12 +1211,23 @@ export const validateAndReturnStep = createStep({
                 repoContext: parsed,
             };
         } catch (error) {
-            logger?.error("❌ Final validation failed", {
+            /* logger?.error("❌ Final validation failed", {
                 step: "6/6",
                 stepName: "Validation & Summary",
                 error: error instanceof Error ? error.message : 'Unknown error',
                 type: "WORKFLOW",
                 runId: runId,
+            }); */
+
+            await notifyStepStatus({
+                stepId: "validate-and-return-step",
+                status: "failed",
+                runId,
+                containerId: inputData.containerId,
+                title: "Validation failed",
+                subtitle: error instanceof Error ? error.message : 'Unknown error',
+                level: 'error',
+                toolCallCount: cliToolMetrics.callCount,
             });
 
             throw new Error(`Validation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -1061,9 +1241,17 @@ export const workflowStartStep = createStep({
     inputSchema: WorkflowInput,
     outputSchema: WorkflowInput,
     execute: async ({ inputData, mastra, runId }) => {
-        const logger = mastra?.getLogger();
+        const logger = ALERTS_ONLY ? null : mastra?.getLogger();
+        await notifyStepStatus({
+            stepId: "workflow-start-step",
+            status: "starting",
+            runId,
+            containerId: inputData.containerId,
+            title: "Gather workflow start",
+            subtitle: "Planning and setup",
+        });
         
-        logger?.info("🚀 Starting fast repository context workflow", {
+        /* logger?.info("🚀 Starting fast repository context workflow", {
             workflowId: "gather-context-workflow",
             workflowName: "Fast Repository Context Analysis",
             containerId: inputData.containerId,
@@ -1072,9 +1260,9 @@ export const workflowStartStep = createStep({
             startTime: new Date().toISOString(),
             type: "WORKFLOW_START",
             runId: runId,
-        });
+        }); */
 
-        logger?.info("📋 Fast workflow execution plan", {
+        /* logger?.info("📋 Fast workflow execution plan", {
             steps: [
                 "1/6: Workflow Start - Log execution plan & setup",
                 "2/6: Parallel Analysis - Repository, Codebase & Build scans (concurrent)",
@@ -1087,6 +1275,16 @@ export const workflowStartStep = createStep({
             parallelSteps: ["Repository Scan", "Codebase Scan", "Build System Scan"],
             type: "WORKFLOW_PLAN",
             runId: runId,
+        }); */
+
+        await notifyStepStatus({
+            stepId: "workflow-start-step",
+            status: "completed",
+            runId,
+            containerId: inputData.containerId,
+            title: "Gather workflow initialized",
+            subtitle: "Plan logged",
+            toolCallCount: cliToolMetrics.callCount,
         });
 
         return inputData;
