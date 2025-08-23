@@ -51,6 +51,7 @@ const CodingTask = z.object({
     testFile: z.string().describe("Test file to generate"),
     testSpec: TestSpecification.describe("Test specification for this file"),
     priority: z.enum(["high", "medium", "low"]).describe("Task priority"),
+    framework: z.string().describe("Testing framework to use"),
 });
 
 /**
@@ -140,23 +141,28 @@ async function callAgent<T>(
         runId: runId,
     });
     
-    // Extract JSON from response
+    // Extract JSON from response with improved logic
     let jsonText = text;
-    const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/```\s*([\s\S]*?)\s*```/);
-    if (jsonMatch) {
-        jsonText = jsonMatch[1];
-        logger?.debug(`📋 Extracted JSON from markdown`, {
+    
+    // Try multiple extraction strategies
+    // 1. Try markdown code fences (json or generic)
+    const jsonMarkdownMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    if (jsonMarkdownMatch && jsonMarkdownMatch[1].trim().length > 10) {
+        jsonText = jsonMarkdownMatch[1].trim();
+        logger?.debug(`📋 Extracted JSON from markdown code fence`, {
             originalLength: text.length,
             extractedLength: jsonText.length,
             type: "JSON_EXTRACTION",
             runId: runId,
         });
-    } else {
+    } 
+    // 2. Try finding the largest JSON object (from first { to last })
+    else {
         const start = text.indexOf('{');
         const end = text.lastIndexOf('}');
         if (start !== -1 && end !== -1 && end > start) {
             jsonText = text.substring(start, end + 1);
-            logger?.debug(`📋 Extracted JSON from boundaries`, {
+            logger?.debug(`📋 Extracted JSON from object boundaries`, {
                 originalLength: text.length,
                 extractedLength: jsonText.length,
                 boundaries: { start, end },
@@ -164,6 +170,40 @@ async function callAgent<T>(
                 runId: runId,
             });
         }
+        // 3. Try finding JSON after common prefixes
+        else {
+            const patterns = [
+                /(?:Here's the|Here is the|The|Result:|Output:)\s*(?:JSON|json)?\s*[:\-]?\s*(\{[\s\S]*\})/i,
+                /(?:```\s*)?(\{[\s\S]*\})(?:\s*```)?/,
+                /JSON:\s*(\{[\s\S]*\})/i
+            ];
+            
+            for (const pattern of patterns) {
+                const match = text.match(pattern);
+                if (match && match[1] && match[1].trim().length > 10) {
+                    jsonText = match[1].trim();
+                    logger?.debug(`📋 Extracted JSON using pattern matching`, {
+                        originalLength: text.length,
+                        extractedLength: jsonText.length,
+                        pattern: pattern.toString(),
+                        type: "JSON_EXTRACTION",
+                        runId: runId,
+                    });
+                    break;
+                }
+            }
+        }
+    }
+    
+    // Validate extraction quality
+    if (jsonText.length < 10 || jsonText === "..." || !jsonText.includes('{')) {
+        logger?.warn(`⚠️ Poor JSON extraction quality`, {
+            extractedLength: jsonText.length,
+            preview: jsonText.substring(0, 100),
+            type: "JSON_EXTRACTION",
+            runId: runId,
+        });
+        throw new Error(`Failed to extract valid JSON from agent response. Preview: ${text.substring(0, 500)}...`);
     }
     
     try {
@@ -178,21 +218,210 @@ async function callAgent<T>(
         });
         
         return validated;
-    } catch (error) {
-        logger?.error(`❌ JSON parsing or validation failed`, {
-            error: error instanceof Error ? error.message : 'Unknown error',
+    } catch (parseError) {
+        logger?.error(`❌ JSON parsing failed, attempting recovery`, {
+            parseError: parseError instanceof Error ? parseError.message : 'Unknown error',
             jsonText: jsonText.substring(0, 500),
             type: "JSON_ERROR",
             runId: runId,
         });
         
-        throw new Error(`JSON parsing failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        // Recovery attempt: try to fix common JSON issues
+        let recoveredJson = jsonText;
+        
+        // Fix trailing commas
+        recoveredJson = recoveredJson.replace(/,(\s*[}\]])/g, '$1');
+        
+        // Fix unescaped quotes in strings (basic attempt)
+        recoveredJson = recoveredJson.replace(/": "([^"]*)"([^",\}\]]*)"([^"]*)"(\s*[,\}\]])/g, '": "$1\\"$2\\"$3"$4');
+        
+        // Fix incomplete JSON (try to close it)
+        const openBraces = (recoveredJson.match(/\{/g) || []).length;
+        const closeBraces = (recoveredJson.match(/\}/g) || []).length;
+        if (openBraces > closeBraces) {
+            recoveredJson += '}';
+        }
+        
+        try {
+            const parsed = JSON.parse(recoveredJson);
+            const validated = schema.parse(parsed);
+            
+            logger?.info(`✅ JSON recovery successful`, {
+                originalLength: jsonText.length,
+                recoveredLength: recoveredJson.length,
+                type: "JSON_RECOVERY",
+                runId: runId,
+            });
+            
+            return validated;
+        } catch (recoveryError) {
+            logger?.error(`❌ JSON parsing and recovery both failed`, {
+                originalError: parseError instanceof Error ? parseError.message : 'Unknown error',
+                recoveryError: recoveryError instanceof Error ? recoveryError.message : 'Unknown error',
+                fullResponse: text.substring(0, 1000),
+                type: "JSON_ERROR",
+                runId: runId,
+            });
+            
+            throw new Error(`JSON parsing failed after recovery attempt. Original: ${parseError instanceof Error ? parseError.message : 'Unknown error'}`);
+        }
+    }
+}
+
+/**
+ * Helper function to save analysis results for resume functionality
+ */
+async function saveAnalysisResults(containerId: string, analysisData: any, logger?: any): Promise<void> {
+    const saveFilePath = `/tmp/analysis-${containerId.substring(0, 12)}.json`;
+    
+    try {
+        const prompt = `Save analysis results for resume functionality using docker_exec with containerId='${containerId}'.
+
+TASK: Save analysis data to file system for resume functionality.
+
+Instructions:
+1. Create the analysis file: echo '${JSON.stringify(analysisData).replace(/'/g, "'\\''")}' > ${saveFilePath}
+2. Verify file was created: ls -la ${saveFilePath}
+
+Save the analysis data so the workflow can resume from test generation step.`;
+
+        await callAgent("unitTestAgent", prompt, z.object({
+            success: z.boolean(),
+            message: z.string(),
+        }), 100, undefined, logger);
+        
+        logger?.info("💾 Analysis results saved for resume functionality", {
+            saveFilePath,
+            containerId: containerId.substring(0, 12),
+            type: "ANALYSIS_SAVE"
+        });
+    } catch (error) {
+        logger?.warn("⚠️ Failed to save analysis results", {
+            saveFilePath,
+            error: error instanceof Error ? error.message : 'Unknown error',
+            type: "ANALYSIS_SAVE"
+        });
+    }
+}
+
+/**
+ * Helper function to load saved analysis results
+ */
+async function loadAnalysisResults(containerId: string, logger?: any): Promise<any | null> {
+    const saveFilePath = `/tmp/analysis-${containerId.substring(0, 12)}.json`;
+    
+    try {
+        const prompt = `Check for and load saved analysis results using docker_exec with containerId='${containerId}'.
+
+TASK: Load previously saved analysis data if it exists.
+
+Instructions:
+1. Check if analysis file exists: test -f ${saveFilePath} && echo "EXISTS" || echo "NOT_EXISTS"
+2. If exists, read the file: cat ${saveFilePath}
+3. Return the analysis data or indicate if not found
+
+Return JSON indicating whether saved analysis was found and the data:
+{
+  "found": true/false,
+  "data": { /* analysis data if found */ }
+}`;
+
+        const result = await callAgent("unitTestAgent", prompt, z.object({
+            found: z.boolean(),
+            data: z.any().optional(),
+        }), 100, undefined, logger);
+        
+        if (result.found && result.data) {
+            logger?.info("📂 Loaded saved analysis results", {
+                saveFilePath,
+                containerId: containerId.substring(0, 12),
+                modulesFound: result.data.repoAnalysis?.sourceModules?.length || 0,
+                testSpecsFound: result.data.testSpecs?.length || 0,
+                type: "ANALYSIS_LOAD"
+            });
+            
+            return result.data;
+        }
+        
+        return null;
+    } catch (error) {
+        logger?.debug("No saved analysis found or failed to load", {
+            saveFilePath,
+            error: error instanceof Error ? error.message : 'Unknown error',
+            type: "ANALYSIS_LOAD"
+        });
+        return null;
     }
 }
 
 // ============================================================================
 // WORKFLOW STEPS
 // ============================================================================
+
+/**
+ * Step 0: Check for Saved Analysis (Resume Functionality)
+ * 
+ * This step checks if there's a previously saved analysis for this container.
+ * If found, it loads the saved data and skips the analysis steps, jumping
+ * directly to test generation for faster iteration.
+ */
+const checkSavedAnalysisStep = createStep({
+    id: "check-saved-analysis-step",
+    inputSchema: WorkflowInput,
+    outputSchema: z.object({
+        containerId: z.string(),
+        contextPath: z.string(),
+        repoAnalysis: RepoTestAnalysis.optional(),
+        testSpecs: z.array(TestSpecification).optional(),
+        skipAnalysis: z.boolean(),
+    }),
+    execute: async ({ inputData, mastra, runId }) => {
+        const { containerId, contextPath } = inputData;
+        const logger = mastra?.getLogger();
+        
+        logger?.info("🔍 Step 0/4: Checking for saved analysis results", {
+            step: "0/4",
+            stepName: "Check Saved Analysis",
+            containerId: containerId.substring(0, 12),
+            type: "WORKFLOW_STEP",
+            runId: runId,
+        });
+
+        // Try to load saved analysis
+        const savedData = await loadAnalysisResults(containerId, logger);
+        
+        if (savedData && savedData.repoAnalysis && savedData.testSpecs) {
+            logger?.info("✅ Step 0/4: Found saved analysis, skipping to test generation", {
+                step: "0/4", 
+                savedModules: savedData.repoAnalysis.sourceModules?.length || 0,
+                savedTestSpecs: savedData.testSpecs?.length || 0,
+                testingFramework: savedData.repoAnalysis.testingFramework,
+                type: "WORKFLOW_STEP",
+                runId: runId,
+            });
+            
+            return {
+                containerId,
+                contextPath,
+                repoAnalysis: savedData.repoAnalysis,
+                testSpecs: savedData.testSpecs,
+                skipAnalysis: true,
+            };
+        } else {
+            logger?.info("📋 Step 0/4: No saved analysis found, proceeding with full workflow", {
+                step: "0/4",
+                type: "WORKFLOW_STEP", 
+                runId: runId,
+            });
+            
+            return {
+                containerId,
+                contextPath,
+                skipAnalysis: false,
+            };
+        }
+    },
+});
 
 /**
  * Step 1: Load Context and Plan Testing Strategy
@@ -203,14 +432,37 @@ async function callAgent<T>(
  */
 const loadContextAndPlanStep = createStep({
     id: "load-context-and-plan-step",
-    inputSchema: WorkflowInput,
+    inputSchema: z.object({
+        containerId: z.string(),
+        contextPath: z.string(),
+        repoAnalysis: RepoTestAnalysis.optional(),
+        testSpecs: z.array(TestSpecification).optional(),
+        skipAnalysis: z.boolean(),
+    }),
     outputSchema: z.object({
         containerId: z.string(),
         contextPath: z.string(),
         repoAnalysis: RepoTestAnalysis,
     }),
     execute: async ({ inputData, mastra, runId }) => {
-        const { containerId, contextPath } = inputData;
+        const { containerId, contextPath, repoAnalysis, skipAnalysis } = inputData;
+        
+        // If we have saved analysis, skip this step
+        if (skipAnalysis && repoAnalysis) {
+            const logger = mastra?.getLogger();
+            logger?.info("⏭️ Step 1/4: Skipping context loading (using saved analysis)", {
+                step: "1/4",
+                stepName: "Load Context & Plan (Skipped)",
+                type: "WORKFLOW_STEP",
+                runId: runId,
+            });
+            
+            return {
+                containerId,
+                contextPath,
+                repoAnalysis,
+            };
+        }
         const logger = mastra?.getLogger();
         
         logger?.info("📋 Step 1/4: Loading repository context and planning unit test strategy", {
@@ -313,6 +565,8 @@ const analyzeAndSpecifyStep = createStep({
         containerId: z.string(),
         contextPath: z.string(),
         repoAnalysis: RepoTestAnalysis,
+        testSpecs: z.array(TestSpecification).optional(),
+        skipAnalysis: z.boolean().optional(),
     }),
     outputSchema: z.object({
         containerId: z.string(),
@@ -320,7 +574,25 @@ const analyzeAndSpecifyStep = createStep({
         testSpecs: z.array(TestSpecification),
     }),
     execute: async ({ inputData, mastra, runId }) => {
-        const { containerId, repoAnalysis } = inputData;
+        const { containerId, repoAnalysis, testSpecs, skipAnalysis } = inputData;
+        
+        // If we have saved analysis, skip this step
+        if (skipAnalysis && testSpecs) {
+            const logger = mastra?.getLogger();
+            logger?.info("⏭️ Step 2/4: Skipping source analysis (using saved test specs)", {
+                step: "2/4",
+                stepName: "Analyze & Specify (Skipped)",
+                savedTestSpecs: testSpecs.length,
+                type: "WORKFLOW_STEP",
+                runId: runId,
+            });
+            
+            return {
+                containerId,
+                repoAnalysis,
+                testSpecs,
+            };
+        }
         const logger = mastra?.getLogger();
         
         logger?.info("🔍 Step 2/4: Analyzing source code and generating test specifications", {
@@ -331,40 +603,45 @@ const analyzeAndSpecifyStep = createStep({
             runId: runId,
         });
 
-        const prompt = `Analyze source files and generate comprehensive test specifications using docker_exec with containerId='${containerId}'.
+        const prompt = `CRITICAL: Return ONLY valid JSON. No explanations, no comments, no markdown - just pure JSON.
 
-TASK: Deep analysis and test specification generation.
+TASK: Generate test specifications for source files using docker_exec with containerId='${containerId}'.
 
 Source Modules: ${JSON.stringify(repoAnalysis.sourceModules)}
 Testing Framework: ${repoAnalysis.testingFramework}
 
-Instructions:
-1. For each source file, analyze the code structure
-2. Identify all functions, methods, and classes
-3. Generate test specifications covering:
-   - Normal/happy path cases
-   - Edge cases and boundary conditions
-   - Error handling scenarios
-4. Plan mocking strategy for dependencies
+ANALYSIS REQUIRED:
+1. Read each source file: docker_exec cat <file_path>
+2. Identify functions, methods, classes, exports
+3. Generate comprehensive test cases for each function
+4. Include edge cases, error scenarios, happy paths
 
-Return JSON with test specifications:
+RETURN FORMAT: Pure JSON only (no code blocks, no explanations):
 {
   "testSpecs": [
     {
-      "sourceFile": "src/mastra/agents/context-agent.ts",
+      "sourceFile": "path/to/file.ts",
       "functions": [
         {
-          "name": "createAgent",
+          "name": "functionName",
           "testCases": [
-            "should create agent with valid config",
-            "should throw error with invalid config",
-            "should handle missing dependencies"
+            "detailed test case description 1",
+            "detailed test case description 2"
           ]
         }
       ]
     }
   ]
-}`;
+}
+
+REQUIREMENTS:
+- Analyze ALL source files in the modules
+- Generate 5-10 test cases per function minimum
+- Include validation, error handling, and edge cases
+- Be specific about expected behavior
+- Test both success and failure scenarios
+
+BEGIN ANALYSIS AND RETURN ONLY JSON:`;
 
         try {
             const result = await callAgent("unitTestAgent", prompt, z.object({
@@ -383,6 +660,15 @@ Return JSON with test specifications:
                 type: "WORKFLOW_STEP",
                 runId: runId,
             });
+
+            // Save analysis results for resume functionality
+            const analysisData = {
+                repoAnalysis,
+                testSpecs: result.testSpecs,
+                timestamp: new Date().toISOString(),
+                version: "1.0"
+            };
+            await saveAnalysisResults(containerId, analysisData, logger);
 
             return {
                 containerId,
@@ -438,45 +724,39 @@ const generateTestCodeStep = createStep({
         // PHASE 1: Manager Agent - Plan Task Distribution
         // ====================================================================
         
-        const managerPrompt = `You are the Test Manager Agent coordinating test generation for ${testSpecs.length} source files.
+        const managerPrompt = `CRITICAL: Return ONLY valid JSON. No explanations, no comments.
 
-TASK: Plan and coordinate test generation using manager-worker pattern.
+TASK: Plan test generation coordination using manager-worker pattern with containerId='${containerId}'.
 
 Test Specifications: ${JSON.stringify(testSpecs)}
 Testing Framework: ${repoAnalysis.testingFramework}
-Test Directory: ${repoAnalysis.testDirectory}
+Test Directory Strategy: ${repoAnalysis.testDirectory}
 Container ID: ${containerId}
 
-COORDINATION STRATEGY:
-1. Use task_logging tool to log planning phase start
-2. Create task distribution plan (one test file per coding agent)
-3. Plan test file paths to avoid conflicts
-4. Set up test directory structure
-5. Return coordination plan for coding agents
+COORDINATION WORKFLOW:
+1. Log task start: task_logging agentId="testManager", taskId="plan-coordination", status="started"
+2. For co-located tests: place .test.ts files next to source files
+3. For separate directory: create __tests__ structure
+4. Assign one source file per coding agent
+5. Log planning completion: status="completed"
 
-TASK DISTRIBUTION RULES:
-- Assign one source file → one test file per coding agent
-- Use unique agent IDs (testCoder-1, testCoder-2, etc.)
-- Plan file paths to avoid conflicts
-- Prioritize high-priority files first
-- Balance workload across agents
+TEST FILE PLACEMENT RULES:
+- If testDirectory contains "co-located": place test files next to source files
+  Example: src/tools/cli-tool.ts → src/tools/cli-tool.test.ts
+- If testDirectory is a path: create directory structure
+  Example: src/tools/cli-tool.ts → __tests__/tools/cli-tool.test.ts
 
-INSTRUCTIONS:
-1. Log task start: task_logging with agentId="testManager", taskId="plan-coordination", status="started"
-2. Create test directory: docker_exec mkdir -p ${repoAnalysis.testDirectory}
-3. Plan task assignments for ${testSpecs.length} coding agents
-4. Log planning completion: status="completed"
-
-Return JSON with task assignments:
+RETURN FORMAT (JSON only):
 {
   "tasks": [
     {
       "taskId": "generate-test-1",
-      "agentId": "testCoder-1", 
-      "sourceFile": "src/mastra/agents/context-agent.ts",
-      "testFile": "__tests__/agents/context-agent.test.ts",
-      "testSpec": { /* test specification */ },
-      "priority": "high"
+      "agentId": "testCoder-1",
+      "sourceFile": "src/mastra/tools/cli-tool.ts",
+      "testFile": "src/mastra/tools/cli-tool.test.ts",
+      "testSpec": ${JSON.stringify(testSpecs[0] || {}, null, 2)},
+      "priority": "high",
+      "framework": "${repoAnalysis.testingFramework}"
     }
   ]
 }`;
@@ -534,42 +814,54 @@ Return JSON with task assignments:
             });
 
             const batchPromises = batch.map(async (task) => {
-                const coderPrompt = `You are Test Coder Agent ${task.agentId} generating unit tests for a specific source file.
+                const coderPrompt = `CRITICAL: Return ONLY valid JSON. No explanations, no comments.
 
-ASSIGNED TASK: ${task.taskId}
-Source File: ${task.sourceFile}
-Test File: ${task.testFile}
-Priority: ${task.priority}
+TASK: Generate complete ${task.framework || repoAnalysis.testingFramework} test file for ${task.sourceFile} using containerId='${containerId}'.
 
-Test Specification: ${JSON.stringify(task.testSpec)}
-Testing Framework: ${repoAnalysis.testingFramework}
-Container ID: ${containerId}
+ASSIGNED WORK:
+- Task ID: ${task.taskId}
+- Agent: ${task.agentId}
+- Source: ${task.sourceFile}
+- Test File: ${task.testFile}
+- Framework: ${task.framework || repoAnalysis.testingFramework}
+- Priority: ${task.priority}
 
-WORKFLOW:
-1. Log task start: task_logging with agentId="${task.agentId}", taskId="${task.taskId}", status="started"
-2. Log planning phase: status="planning" 
-3. Analyze source file: docker_exec cat ${task.sourceFile}
-4. Log coding phase: status="coding"
-5. Generate comprehensive test file with proper structure
-6. Create test file: docker_exec 'echo "test_content" > ${task.testFile}'
-7. Log validation phase: status="validating"
-8. Validate syntax and imports
+TEST SPECIFICATION:
+${JSON.stringify(task.testSpec, null, 2)}
+
+IMPLEMENTATION WORKFLOW:
+1. Log start: task_logging agentId="${task.agentId}", taskId="${task.taskId}", status="started"
+2. Log planning: status="planning"
+3. Read source: docker_exec cat ${task.sourceFile}
+4. Log coding: status="coding"
+5. Generate complete test file with:
+   - Proper imports (vitest: vi, expect, describe, it, beforeEach, afterEach)
+   - Mock setup for external dependencies
+   - Individual test cases for each function
+   - Descriptive test names matching specifications
+   - Proper assertions and expectations
+   - Setup/teardown as needed
+6. Write test file: docker_exec "cat > ${task.testFile} << 'EOF' [complete_test_content] EOF"
+7. Log validation: status="validating"
+8. Verify file creation: docker_exec cat ${task.testFile}
 9. Log completion: status="completed"
 
-QUALITY REQUIREMENTS:
-- Follow ${repoAnalysis.testingFramework} best practices
-- Include proper imports, setup, and teardown
-- Write descriptive test names and meaningful assertions
-- Add proper mocking for dependencies
-- Cover all test cases from specification
-- Ensure clean, readable code with comments
+CODE GENERATION REQUIREMENTS:
+- Use ${task.framework || repoAnalysis.testingFramework} (vi.mock, vi.fn, expect, describe, it)
+- Mock ALL external dependencies (child_process, fs, @mastra/core, etc.)
+- Implement EVERY test case from the specification exactly
+- Use descriptive test names that match the specification
+- Include proper error scenarios and edge cases
+- Add beforeEach/afterEach for state cleanup
+- Follow TypeScript best practices
+- Ensure all imports are correct and complete
 
-Return JSON with generation result:
+RETURN FORMAT (JSON only):
 {
   "sourceFile": "${task.sourceFile}",
   "testFile": "${task.testFile}",
-  "functionsCount": 3,
-  "testCasesCount": 9,
+  "functionsCount": <number_of_functions_tested>,
+  "testCasesCount": <total_test_cases_implemented>,
   "success": true,
   "error": null
 }`;
@@ -849,10 +1141,11 @@ Return recommendations and validation results.`;
  */
 export const generateUnitTestsWorkflow = createWorkflow({
     id: "generate-unit-tests-workflow",
-    description: "Generate comprehensive unit tests using AI analysis, manager-worker pattern, and best practices",
+    description: "Generate comprehensive unit tests using AI analysis, manager-worker pattern, and best practices with resume functionality",
     inputSchema: WorkflowInput,
     outputSchema: UnitTestResult,
 })
+.then(checkSavedAnalysisStep)
 .then(loadContextAndPlanStep)
 .then(analyzeAndSpecifyStep)  
 .then(generateTestCodeStep)
