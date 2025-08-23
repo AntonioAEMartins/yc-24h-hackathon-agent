@@ -13,6 +13,7 @@ const ALERTS_ONLY = (process.env.ALERTS_ONLY === 'true') || (process.env.LOG_MOD
 // Input schema - what we start with
 const WorkflowInput = z.object({
     containerId: z.string(),
+    repoPath: z.string().optional(),
 });
 
 // Repository structure schema
@@ -147,13 +148,13 @@ async function callContextAgentForAnalysis<T>(
     const agent = mastra?.getAgent("contextAgent");
     if (!agent) throw new Error("Context agent not found");
     
-    /* logger?.debug("🤖 Invoking context agent", {
+    logger?.debug("🤖 Invoking context agent", {
         promptLength: prompt.length,
         maxSteps,
         schemaName: (schema as any)._def?.typeName || 'unknown',
         type: "AGENT_CALL",
         runId: runId,
-    }); */
+    });
 
     const startTime = Date.now();
     const result: any = await agent.generate(prompt, { 
@@ -165,37 +166,37 @@ async function callContextAgentForAnalysis<T>(
     
     const text = (result?.text || "{}").toString();
     
-    /* logger?.debug("📤 Agent response received", {
+    logger?.debug("📤 Agent response received", {
         responseLength: text.length,
         duration: `${duration}ms`,
         type: "AGENT_RESPONSE",
         runId: runId,
-    }); */
+    });
     
     // Try to extract JSON from response if it's wrapped in markdown or explanatory text
     let jsonText = text;
     const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/```\s*([\s\S]*?)\s*```/);
     if (jsonMatch) {
         jsonText = jsonMatch[1];
-        /* logger?.debug("📋 Extracted JSON from markdown", {
+        logger?.debug("📋 Extracted JSON from markdown", {
             originalLength: text.length,
             extractedLength: jsonText.length,
             type: "JSON_EXTRACTION",
             runId: runId,
-        }); */
+        });
     } else {
         // Look for JSON object boundaries
         const start = text.indexOf('{');
         const end = text.lastIndexOf('}');
         if (start !== -1 && end !== -1 && end > start) {
             jsonText = text.substring(start, end + 1);
-            /* logger?.debug("📋 Extracted JSON from boundaries", {
+            logger?.debug("📋 Extracted JSON from boundaries", {
                 originalLength: text.length,
                 extractedLength: jsonText.length,
                 boundaries: { start, end },
                 type: "JSON_EXTRACTION",
                 runId: runId,
-            }); */
+            });
         }
     }
     
@@ -203,21 +204,21 @@ async function callContextAgentForAnalysis<T>(
         const parsed = JSON.parse(jsonText);
         const validated = schema.parse(parsed);
         
-        /* logger?.debug("✅ JSON parsing and validation successful", {
+        logger?.debug("✅ JSON parsing and validation successful", {
             jsonLength: jsonText.length,
             validatedKeys: typeof validated === 'object' && validated !== null ? Object.keys(validated as object).length : 0,
             type: "JSON_VALIDATION",
             runId: runId,
-        }); */
+        });
         
         return validated;
     } catch (error) {
-        /* logger?.error("❌ JSON parsing or validation failed", {
+        logger?.error("❌ JSON parsing or validation failed", {
             error: error instanceof Error ? error.message : 'Unknown error',
             jsonText: jsonText.substring(0, 500), // First 500 chars for debugging
             type: "JSON_ERROR",
             runId: runId,
-        }); */
+        });
         
         throw new Error(`JSON parsing failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
@@ -233,6 +234,7 @@ export const analyzeRepositoryStep = createStep({
     }),
     execute: async ({ inputData, mastra, runId }) => {
         const { containerId } = inputData;
+        const repoPath = (inputData as any).repoPath || '';
         const logger = ALERTS_ONLY ? null : mastra?.getLogger();
         await notifyStepStatus({
             stepId: "analyze-repository-step",
@@ -243,7 +245,7 @@ export const analyzeRepositoryStep = createStep({
             subtitle: "Quick repository scan starting",
         });
         
-        /* logger?.info("🔍 Starting quick repository scan", {
+        logger?.info("🔍 Starting quick repository scan", {
             step: "1/6", 
             stepName: "Repository Quick Scan",
             containerId,
@@ -251,22 +253,22 @@ export const analyzeRepositoryStep = createStep({
             startTime: new Date().toISOString(),
             type: "WORKFLOW",
             runId: runId,
-        }); */
+        });
 
         const prompt = `CRITICAL: Navigate to repository and analyze efficiently. Use docker_exec with containerId='${containerId}'.
 
 MANDATORY WORKFLOW (Execute in exact order):
-1. Find repository: docker_exec ls -la /app/
-2. Navigate to repo: docker_exec cd /app/yc-24h-hackathon-agent && pwd
-3. Git status: docker_exec cd /app/yc-24h-hackathon-agent && git status --porcelain && git branch && git remote -v
-4. Quick scan: docker_exec cd /app/yc-24h-hackathon-agent && ls -la
-5. Source check: docker_exec cd /app/yc-24h-hackathon-agent && find src -name "*.ts" -o -name "*.js" | head -10 2>/dev/null || echo "NO_SRC"
-6. Package type: docker_exec cd /app/yc-24h-hackathon-agent && test -f package.json && echo "SINGLE_PACKAGE" || echo "OTHER"
+1. List /app: docker_exec ls -la /app/
+2. Resolve repo: docker_exec REPO_DIR=$( if [ -n '${repoPath}' ] && [ -d '${repoPath}/.git' ]; then echo '${repoPath}'; else for d in /app/*; do if [ -d "$d/.git" ]; then echo "$d"; break; fi; done; fi ); echo \${REPO_DIR:-/app}
+3. Git status: docker_exec REPO_DIR=$( if [ -n '${repoPath}' ] && [ -d '${repoPath}/.git' ]; then echo '${repoPath}'; else for d in /app/*; do if [ -d "$d/.git" ]; then echo "$d"; break; fi; done; fi ); cd "\${REPO_DIR:-/app}"; if [ -d .git ]; then git status --porcelain && git branch && git remote -v; else echo "NO_GIT"; fi
+4. Quick scan: docker_exec REPO_DIR=$( if [ -n '${repoPath}' ] && [ -d '${repoPath}/.git' ]; then echo '${repoPath}'; else for d in /app/*; do if [ -d "$d/.git" ]; then echo "$d"; break; fi; done; fi ); cd "\${REPO_DIR:-/app}"; ls -la
+5. Source check: docker_exec REPO_DIR=$( if [ -n '${repoPath}' ] && [ -d '${repoPath}/.git' ]; then echo '${repoPath}'; else for d in /app/*; do if [ -d "$d/.git" ]; then echo "$d"; break; fi; done; fi ); cd "\${REPO_DIR:-/app}"; if [ -d src ]; then find src -name "*.ts" -o -name "*.js" | head -10; else echo "NO_SRC"; fi
+6. Package type: docker_exec REPO_DIR=$( if [ -n '${repoPath}' ] && [ -d '${repoPath}/.git' ]; then echo '${repoPath}'; else for d in /app/*; do if [ -d "$d/.git" ]; then echo "$d"; break; fi; done; fi ); cd "\${REPO_DIR:-/app}"; if [ -f package.json ]; then echo "SINGLE_PACKAGE"; else echo "OTHER"; fi
 
 FAST ANALYSIS - Return JSON immediately:
 {
   "type": "single-package",
-  "rootPath": "/app/yc-24h-hackathon-agent",
+  "rootPath": "/app",
   "gitStatus": {
     "isGitRepo": true,
     "defaultBranch": "main",
@@ -275,7 +277,7 @@ FAST ANALYSIS - Return JSON immediately:
     "isDirty": false
   },
   "structure": {
-    "packages": [{"path": ".", "name": "yc-24h-hackathon-agent", "type": "app", "language": "typescript"}],
+    "packages": [{"path": ".", "name": "dynamic", "type": "app", "language": "typescript"}],
     "keyDirectories": ["src"],
     "ignoredPaths": ["node_modules", ".git", "build", "dist"]
   },
@@ -283,17 +285,17 @@ FAST ANALYSIS - Return JSON immediately:
 }`;
         
         try {
-            /* logger?.info("🤖 Quick repository assessment call", {
+            logger?.info("🤖 Quick repository assessment call", {
                 step: "1/6",
                 action: "agent-call",
                 agentType: "contextAgent",
                 type: "WORKFLOW",
                 runId: runId,
-            }); */
+            });
 
             const result = await callContextAgentForAnalysis(prompt, RepositoryStructure, 8, runId, logger);
             
-            /* logger?.info("✅ Repository scan completed quickly", {
+            logger?.info("✅ Repository scan completed quickly", {
                 step: "1/6",
                 stepName: "Repository Analysis",
                 duration: "completed",
@@ -303,7 +305,7 @@ FAST ANALYSIS - Return JSON immediately:
                 packageCount: result.structure.packages.length,
                 type: "WORKFLOW",
                 runId: runId,
-            }); */
+            });
 
             await notifyStepStatus({
                 stepId: "analyze-repository-step",
@@ -321,14 +323,14 @@ FAST ANALYSIS - Return JSON immediately:
                 repository: result,
             };
         } catch (error) {
-            /* logger?.error("❌ Repository analysis failed", {
+            logger?.error("❌ Repository analysis failed", {
                 step: "1/6",
                 stepName: "Repository Analysis",
                 error: error instanceof Error ? error.message : 'Unknown error',
                 containerId,
                 type: "WORKFLOW",
                 runId: runId,
-            }); */
+            });
 
             await notifyStepStatus({
                 stepId: "analyze-repository-step",
@@ -341,12 +343,12 @@ FAST ANALYSIS - Return JSON immediately:
                 toolCallCount: cliToolMetrics.callCount,
             });
 
-            /* logger?.warn("🔄 Using fallback repository structure", {
+            logger?.warn("🔄 Using fallback repository structure", {
                 step: "1/6",
                 action: "fallback",
                 type: "WORKFLOW",
                 runId: runId,
-            }); */
+            });
 
             // Return minimal fallback structure
             return {
@@ -383,6 +385,7 @@ export const analyzeCodebaseStep = createStep({
     }),
     execute: async ({ inputData, mastra, runId }) => {
         const { containerId } = inputData;
+        const repoPath = (inputData as any).repoPath || '';
         const logger = ALERTS_ONLY ? null : mastra?.getLogger();
         await notifyStepStatus({
             stepId: "analyze-codebase-step",
@@ -393,24 +396,24 @@ export const analyzeCodebaseStep = createStep({
             subtitle: "Focused codebase scan starting",
         });
         
-        /* logger?.info("📊 Starting focused codebase scan", {
+        logger?.info("📊 Starting focused codebase scan", {
             step: "2/6",
             stepName: "Codebase Analysis",
             containerId,
             startTime: new Date().toISOString(),
             type: "WORKFLOW",
             runId: runId,
-        }); */
+        });
 
         const prompt = `FAST codebase scan using docker_exec with containerId='${containerId}'. Focus on speed over completeness.
 
 RAPID WORKFLOW (6 commands max):
-1. Dependencies: docker_exec cd /app/yc-24h-hackathon-agent && grep -E '"(@mastra|vitest|jest)"' package.json
-2. Source scan: docker_exec cd /app/yc-24h-hackathon-agent && ls -la src/
-3. Main modules: docker_exec cd /app/yc-24h-hackathon-agent && find src -type d -maxdepth 2
-4. Test check: docker_exec cd /app/yc-24h-hackathon-agent && ls *test* *spec* 2>/dev/null || echo "NO_TESTS"
-5. Config files: docker_exec cd /app/yc-24h-hackathon-agent && ls *.json *.config.*
-6. TypeScript: docker_exec cd /app/yc-24h-hackathon-agent && find src -name "*.ts" | wc -l
+1. Dependencies: docker_exec REPO_DIR=$( if [ -n '${repoPath}' ] && [ -d '${repoPath}/.git' ]; then echo '${repoPath}'; else for d in /app/*; do if [ -d "$d/.git" ]; then echo "$d"; break; fi; done; fi ); cd "\${REPO_DIR:-/app}"; if [ -f package.json ]; then grep -E '"(@mastra|vitest|jest)"' package.json || true; else echo "NO_PACKAGE_JSON"; fi
+2. Source scan: docker_exec REPO_DIR=$( if [ -n '${repoPath}' ] && [ -d '${repoPath}/.git' ]; then echo '${repoPath}'; else for d in /app/*; do if [ -d "$d/.git" ]; then echo "$d"; break; fi; done; fi ); cd "\${REPO_DIR:-/app}"; if [ -d src ]; then ls -la src/; else echo "NO_SRC"; fi
+3. Main modules: docker_exec REPO_DIR=$( if [ -n '${repoPath}' ] && [ -d '${repoPath}/.git' ]; then echo '${repoPath}'; else for d in /app/*; do if [ -d "$d/.git" ]; then echo "$d"; break; fi; done; fi ); cd "\${REPO_DIR:-/app}"; if [ -d src ]; then find src -type d -maxdepth 2; else echo "NO_SRC"; fi
+4. Test check: docker_exec REPO_DIR=$( if [ -n '${repoPath}' ] && [ -d '${repoPath}/.git' ]; then echo '${repoPath}'; else for d in /app/*; do if [ -d "$d/.git" ]; then echo "$d"; break; fi; done; fi ); cd "\${REPO_DIR:-/app}"; ls *test* *spec* 2>/dev/null || echo "NO_TESTS"
+5. Config files: docker_exec REPO_DIR=$( if [ -n '${repoPath}' ] && [ -d '${repoPath}/.git' ]; then echo '${repoPath}'; else for d in /app/*; do if [ -d "$d/.git" ]; then echo "$d"; break; fi; done; fi ); cd "\${REPO_DIR:-/app}"; ls *.json *.config.* 2>/dev/null || echo "NO_CONFIG"
+6. TypeScript: docker_exec REPO_DIR=$( if [ -n '${repoPath}' ] && [ -d '${repoPath}/.git' ]; then echo '${repoPath}'; else for d in /app/*; do if [ -d "$d/.git" ]; then echo "$d"; break; fi; done; fi ); cd "\${REPO_DIR:-/app}"; if [ -d src ]; then find src -name "*.ts" | wc -l; else echo 0; fi
 
 IMMEDIATE JSON RESPONSE:
 {
@@ -435,18 +438,18 @@ IMMEDIATE JSON RESPONSE:
 }`;
         
         try {
-            /* logger?.info("🔬 Quick dependency and framework scan", {
+            logger?.info("🔬 Quick dependency and framework scan", {
                 step: "2/6",
                 action: "agent-call",
                 agentType: "contextAgent",
                 focus: "architecture and dependencies",
                 type: "WORKFLOW",
                 runId: runId,
-            }); */
+            });
 
             const result = await callContextAgentForAnalysis(prompt, CodebaseAnalysis, 6, runId, logger);
             
-            /* logger?.info("✅ Codebase scan completed efficiently", {
+            logger?.info("✅ Codebase scan completed efficiently", {
                 step: "2/6",
                 stepName: "Codebase Analysis",
                 duration: "completed",
@@ -457,7 +460,7 @@ IMMEDIATE JSON RESPONSE:
                 keyLibrariesCount: result.architecture.dependencies.keyLibraries.length,
                 type: "WORKFLOW",
                 runId: runId,
-            }); */
+            });
 
             await notifyStepStatus({
                 stepId: "analyze-codebase-step",
@@ -474,14 +477,14 @@ IMMEDIATE JSON RESPONSE:
                 codebase: result,
             };
         } catch (error) {
-            /* logger?.error("❌ Codebase analysis failed", {
+            logger?.error("❌ Codebase analysis failed", {
                 step: "2/6",
                 stepName: "Codebase Analysis",
                 error: error instanceof Error ? error.message : 'Unknown error',
                 containerId,
                 type: "WORKFLOW",
                 runId: runId,
-            }); */
+            });
 
             await notifyStepStatus({
                 stepId: "analyze-codebase-step",
@@ -494,12 +497,12 @@ IMMEDIATE JSON RESPONSE:
                 toolCallCount: cliToolMetrics.callCount,
             });
 
-            /* logger?.warn("🔄 Using fallback codebase structure", {
+            logger?.warn("🔄 Using fallback codebase structure", {
                 step: "2/6",
                 action: "fallback",
                 type: "WORKFLOW",
                 runId: runId,
-            }); */
+            });
 
             return {
                 containerId,
@@ -542,6 +545,7 @@ export const analyzeBuildDeploymentStep = createStep({
     }),
     execute: async ({ inputData, mastra, runId }) => {
         const { containerId } = inputData;
+        const repoPath = (inputData as any).repoPath || '';
         const logger = ALERTS_ONLY ? null : mastra?.getLogger();
         await notifyStepStatus({
             stepId: "analyze-build-deployment-step",
@@ -552,22 +556,22 @@ export const analyzeBuildDeploymentStep = createStep({
             subtitle: "DevOps scan starting",
         });
         
-        /* logger?.info("🏗️ Starting fast build system scan", {
+        logger?.info("🏗️ Starting fast build system scan", {
             step: "3/6",
             stepName: "Build & Deployment Analysis",
             containerId,
             startTime: new Date().toISOString(),
             type: "WORKFLOW",
             runId: runId,
-        }); */
+        });
 
         const prompt = `LIGHTNING DevOps scan using docker_exec with containerId='${containerId}'. Maximum 4 commands.
 
 SPEED WORKFLOW:
-1. Package manager: docker_exec cd /app/yc-24h-hackathon-agent && ls package-lock.json yarn.lock pnpm-lock.yaml 2>/dev/null || echo "NONE"
-2. Scripts: docker_exec cd /app/yc-24h-hackathon-agent && grep -A3 '"scripts"' package.json
-3. CI/CD: docker_exec cd /app/yc-24h-hackathon-agent && ls .github/workflows/ 2>/dev/null || echo "NO_CI"
-4. Docker: docker_exec cd /app/yc-24h-hackathon-agent && ls Dockerfile* docker-compose* 2>/dev/null || echo "NO_DOCKER"
+1. Package manager: docker_exec REPO_DIR=$( if [ -n '${repoPath}' ] && [ -d '${repoPath}/.git' ]; then echo '${repoPath}'; else for d in /app/*; do if [ -d "$d/.git" ]; then echo "$d"; break; fi; done; fi ); cd "\${REPO_DIR:-/app}"; ls package-lock.json yarn.lock pnpm-lock.yaml 2>/dev/null || echo "NONE"
+2. Scripts: docker_exec REPO_DIR=$( if [ -n '${repoPath}' ] && [ -d '${repoPath}/.git' ]; then echo '${repoPath}'; else for d in /app/*; do if [ -d "$d/.git" ]; then echo "$d"; break; fi; done; fi ); cd "\${REPO_DIR:-/app}"; if [ -f package.json ]; then grep -A3 '"scripts"' package.json || true; else echo "NO_PACKAGE_JSON"; fi
+3. CI/CD: docker_exec REPO_DIR=$( if [ -n '${repoPath}' ] && [ -d '${repoPath}/.git' ]; then echo '${repoPath}'; else for d in /app/*; do if [ -d "$d/.git" ]; then echo "$d"; break; fi; done; fi ); cd "\${REPO_DIR:-/app}"; ls .github/workflows/ 2>/dev/null || echo "NO_CI"
+4. Docker: docker_exec REPO_DIR=$( if [ -n '${repoPath}' ] && [ -d '${repoPath}/.git' ]; then echo '${repoPath}'; else for d in /app/*; do if [ -d "$d/.git" ]; then echo "$d"; break; fi; done; fi ); cd "\${REPO_DIR:-/app}"; ls Dockerfile* docker-compose* 2>/dev/null || echo "NO_DOCKER"
 
 INSTANT JSON:
 {
@@ -597,18 +601,18 @@ INSTANT JSON:
 }`;
         
         try {
-            /* logger?.info("🚀 Quick build and deployment check", {
+            logger?.info("🚀 Quick build and deployment check", {
                 step: "3/6",
                 action: "agent-call",
                 agentType: "contextAgent",
                 focus: "DevOps and deployment",
                 type: "WORKFLOW",
                 runId: runId,
-            }); */
+            });
 
             const result = await callContextAgentForAnalysis(prompt, BuildAndDeployment, 4, runId, logger);
             
-            /* logger?.info("✅ Build system scan completed rapidly", {
+            logger?.info("✅ Build system scan completed rapidly", {
                 step: "3/6",
                 stepName: "Build & Deployment Analysis",
                 duration: "completed",
@@ -620,7 +624,7 @@ INSTANT JSON:
                 buildAttempts: result.buildSystem.buildAttempts.length,
                 type: "WORKFLOW",
                 runId: runId,
-            }); */
+            });
 
             await notifyStepStatus({
                 stepId: "analyze-build-deployment-step",
@@ -637,14 +641,14 @@ INSTANT JSON:
                 buildDeploy: result,
             };
         } catch (error) {
-            /* logger?.error("❌ Build and deployment analysis failed", {
+            logger?.error("❌ Build and deployment analysis failed", {
                 step: "3/6",
                 stepName: "Build & Deployment Analysis",
                 error: error instanceof Error ? error.message : 'Unknown error',
                 containerId,
                 type: "WORKFLOW",
                 runId: runId,
-            }); */
+            });
 
             await notifyStepStatus({
                 stepId: "analyze-build-deployment-step",
@@ -657,12 +661,12 @@ INSTANT JSON:
                 toolCallCount: cliToolMetrics.callCount,
             });
 
-            /* logger?.warn("🔄 Using fallback build deployment structure", {
+            logger?.warn("🔄 Using fallback build deployment structure", {
                 step: "3/6",
                 action: "fallback",
                 type: "WORKFLOW",
                 runId: runId,
-            }); */
+            });
 
             return {
                 containerId,
@@ -735,7 +739,7 @@ export const synthesizeContextStep = createStep({
             subtitle: "Generating insights and executive summary",
         });
         
-        /* logger?.info("🧠 Starting context synthesis and insights generation", {
+        logger?.info("🧠 Starting context synthesis and insights generation", {
             step: "4/6",
             stepName: "Context Synthesis",
             repositoryType: repository.type,
@@ -750,7 +754,7 @@ export const synthesizeContextStep = createStep({
             startTime: new Date().toISOString(),
             type: "WORKFLOW",
             runId: runId,
-        }); */
+        });
         
         const prompt = `You are a senior technical lead providing an executive summary and insights about a codebase.
 
@@ -801,18 +805,18 @@ Return strictly JSON matching this schema:
 }`;
         
         try {
-            /* logger?.info("💡 Generating insights and executive summary", {
+            logger?.info("💡 Generating insights and executive summary", {
                 step: "4/6",
                 action: "agent-call",
                 agentType: "contextAgent",
                 focus: "technical leadership insights",
                 type: "WORKFLOW",
                 runId: runId,
-            }); */
+            });
 
             const result = await callContextAgentForAnalysis(prompt, RepoContext, 10, runId, logger);
             
-            /* logger?.info("✅ Context synthesis completed successfully", {
+            logger?.info("✅ Context synthesis completed successfully", {
                 step: "4/6",
                 stepName: "Context Synthesis",
                 duration: "completed",
@@ -828,7 +832,7 @@ Return strictly JSON matching this schema:
                 confidence: result.confidence,
                 type: "WORKFLOW",
                 runId: runId,
-            }); */
+            });
 
             await notifyStepStatus({
                 stepId: "synthesize-context-step",
@@ -842,13 +846,13 @@ Return strictly JSON matching this schema:
 
             return { ...result, containerId };
         } catch (error) {
-            /* logger?.error("❌ Context synthesis failed", {
+            logger?.error("❌ Context synthesis failed", {
                 step: "4/6",
                 stepName: "Context Synthesis",
                 error: error instanceof Error ? error.message : 'Unknown error',
                 type: "WORKFLOW",
                 runId: runId,
-            }); */
+            });
 
             await notifyStepStatus({
                 stepId: "synthesize-context-step",
@@ -861,12 +865,12 @@ Return strictly JSON matching this schema:
                 toolCallCount: cliToolMetrics.callCount,
             });
 
-            /* logger?.warn("🔄 Using fallback insights and summary", {
+            logger?.warn("🔄 Using fallback insights and summary", {
                 step: "4/6",
                 action: "fallback",
                 type: "WORKFLOW",
                 runId: runId,
-            }); */
+            });
 
             return {
                 containerId,
@@ -918,13 +922,13 @@ export const saveContextStep = createStep({
             subtitle: "Writing agent.context.json",
         });
         
-        /* logger?.info("💾 Saving context for unit test generation", {
+        logger?.info("💾 Saving context for unit test generation", {
             step: "5/6",
             stepName: "Save Unit Test Context",
             startTime: new Date().toISOString(),
             type: "WORKFLOW",
             runId: runId,
-        }); */
+        });
 
         const { containerId, ...repoContextData } = inputData;
         const parsed = RepoContext.parse(repoContextData);
@@ -1000,14 +1004,14 @@ export const saveContextStep = createStep({
                     tempFilePath = path.join(tempDir, 'agent.context.json');
                     writeFileSync(tempFilePath, contextJson, 'utf8');
 
-                    /* logger?.info("🐳 Copying context file into Docker container", {
+                    logger?.info("🐳 Copying context file into Docker container", {
                         step: "5/6",
                         action: "docker-cp",
                         path: contextPath,
                         sizeBytes: contextJson.length,
                         type: "WORKFLOW",
                         runId: runId,
-                    }); */
+                    });
 
                     const copyCmd = `docker cp "${tempFilePath}" ${containerId}:${contextPath}`;
                     exec(copyCmd, (copyError, _copyStdout, copyStderr) => {
@@ -1017,11 +1021,11 @@ export const saveContextStep = createStep({
                         }
 
                         if (copyError) {
-                            /* logger?.error("❌ Failed to copy context file to container", {
+                            logger?.error("❌ Failed to copy context file to container", {
                                 error: copyStderr || copyError.message,
                                 type: "WORKFLOW",
                                 runId: runId,
-                            }); */
+                            });
                             reject(new Error(copyStderr || copyError.message));
                             return;
                         }
@@ -1029,17 +1033,17 @@ export const saveContextStep = createStep({
                         const verifyCmd = `docker exec ${containerId} bash -lc "test -f ${contextPath} && wc -c ${contextPath}"`;
                         exec(verifyCmd, (verifyError, verifyStdout, verifyStderr) => {
                             if (verifyError) {
-                                /* logger?.error("❌ Context file verification failed", {
+                                logger?.error("❌ Context file verification failed", {
                                     error: verifyStderr || verifyError.message,
                                     type: "WORKFLOW",
                                     runId: runId,
-                                }); */
+                                });
                                 reject(new Error(verifyStderr || verifyError.message));
                                 return;
                             }
 
                             const fileSize = verifyStdout.trim().split(' ')[0] || '0';
-                            /* logger?.info("✅ Context file saved to container", {
+                            logger?.info("✅ Context file saved to container", {
                                 step: "5/6",
                                 contextPath,
                                 fileSize: `${parseInt(fileSize)} bytes`,
@@ -1052,7 +1056,7 @@ export const saveContextStep = createStep({
                                 },
                                 type: "WORKFLOW",
                                 runId: runId,
-                            }); */
+                            });
 
                             notifyStepStatus({
                                 stepId: "save-context-step",
@@ -1081,21 +1085,21 @@ export const saveContextStep = createStep({
                 }
             });
         } catch (error) {
-            /* logger?.error("❌ Failed to save context file", {
+            logger?.error("❌ Failed to save context file", {
                 step: "5/6",
                 stepName: "Save Unit Test Context",
                 error: error instanceof Error ? error.message : 'Unknown error',
                 contextPath,
                 type: "WORKFLOW",
                 runId: runId,
-            }); */
+            });
 
-            /* logger?.warn("🔄 Continuing without saved context file", {
+            logger?.warn("🔄 Continuing without saved context file", {
                 step: "5/6",
                 action: "continue-without-file",
                 type: "WORKFLOW",
                 runId: runId,
-            }); */
+            });
 
             await notifyStepStatus({
                 stepId: "save-context-step",
@@ -1144,19 +1148,19 @@ export const validateAndReturnStep = createStep({
             subtitle: "Final validation starting",
         });
         
-        /* logger?.info("🔍 Starting final validation and summary", {
+        logger?.info("🔍 Starting final validation and summary", {
             step: "6/6",
             stepName: "Validation & Summary",
             startTime: new Date().toISOString(),
             type: "WORKFLOW",
             runId: runId,
-        }); */
+        });
 
         try {
             const { containerId, contextPath, repoContext } = inputData;
             const parsed = RepoContext.parse(repoContext);
             
-            /* logger?.info("📋 Workflow execution summary", {
+            logger?.info("📋 Workflow execution summary", {
                 step: "6/6",
                 stepName: "Validation & Summary",
                 totalToolCalls: cliToolMetrics.callCount,
@@ -1180,9 +1184,9 @@ export const validateAndReturnStep = createStep({
                 },
                 type: "WORKFLOW",
                 runId: runId,
-            }); */
+            });
 
-            /* logger?.info("✅ Repository context analysis completed successfully", {
+            logger?.info("✅ Repository context analysis completed successfully", {
                 step: "6/6",
                 stepName: "Validation & Summary",
                 duration: "completed",
@@ -1191,7 +1195,7 @@ export const validateAndReturnStep = createStep({
                 readyForUnitTests: true,
                 type: "WORKFLOW",
                 runId: runId,
-            }); */
+            });
 
             await notifyStepStatus({
                 stepId: "validate-and-return-step",
@@ -1211,13 +1215,13 @@ export const validateAndReturnStep = createStep({
                 repoContext: parsed,
             };
         } catch (error) {
-            /* logger?.error("❌ Final validation failed", {
+            logger?.error("❌ Final validation failed", {
                 step: "6/6",
                 stepName: "Validation & Summary",
                 error: error instanceof Error ? error.message : 'Unknown error',
                 type: "WORKFLOW",
                 runId: runId,
-            }); */
+            });
 
             await notifyStepStatus({
                 stepId: "validate-and-return-step",
@@ -1251,7 +1255,7 @@ export const workflowStartStep = createStep({
             subtitle: "Planning and setup",
         });
         
-        /* logger?.info("🚀 Starting fast repository context workflow", {
+        logger?.info("🚀 Starting fast repository context workflow", {
             workflowId: "gather-context-workflow",
             workflowName: "Fast Repository Context Analysis",
             containerId: inputData.containerId,
@@ -1260,9 +1264,9 @@ export const workflowStartStep = createStep({
             startTime: new Date().toISOString(),
             type: "WORKFLOW_START",
             runId: runId,
-        }); */
+        });
 
-        /* logger?.info("📋 Fast workflow execution plan", {
+        logger?.info("📋 Fast workflow execution plan", {
             steps: [
                 "1/6: Workflow Start - Log execution plan & setup",
                 "2/6: Parallel Analysis - Repository, Codebase & Build scans (concurrent)",
@@ -1275,7 +1279,7 @@ export const workflowStartStep = createStep({
             parallelSteps: ["Repository Scan", "Codebase Scan", "Build System Scan"],
             type: "WORKFLOW_PLAN",
             runId: runId,
-        }); */
+        });
 
         await notifyStepStatus({
             stepId: "workflow-start-step",

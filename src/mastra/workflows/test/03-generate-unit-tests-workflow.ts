@@ -124,13 +124,13 @@ async function callAgent<T>(
         throw new Error(`Agent '${agentName}' not found`);
     }
     
-    /* logger?.debug(`🤖 Invoking ${agentName}`, {
+    logger?.debug(`🤖 Invoking ${agentName}`, {
         promptLength: prompt.length,
         maxSteps,
         schemaName: (schema as any)._def?.typeName || 'unknown',
         type: "AGENT_CALL",
         runId: runId,
-    }); */
+    });
 
     const startTime = Date.now();
     const result: any = await agent.generate(prompt, { 
@@ -141,12 +141,12 @@ async function callAgent<T>(
     
     const text = (result?.text || "{}").toString();
     
-    /* logger?.debug(`📤 ${agentName} response received`, {
+    logger?.debug(`📤 ${agentName} response received`, {
         responseLength: text.length,
         duration: `${duration}ms`,
         type: "AGENT_RESPONSE",
         runId: runId,
-    }); */
+    });
     
     // Extract JSON from response with improved logic
     let jsonText = text;
@@ -156,12 +156,12 @@ async function callAgent<T>(
     const jsonMarkdownMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
     if (jsonMarkdownMatch && jsonMarkdownMatch[1].trim().length > 10) {
         jsonText = jsonMarkdownMatch[1].trim();
-        /* logger?.debug(`📋 Extracted JSON from markdown code fence`, {
+        logger?.debug(`📋 Extracted JSON from markdown code fence`, {
             originalLength: text.length,
             extractedLength: jsonText.length,
             type: "JSON_EXTRACTION",
             runId: runId,
-        }); */
+        });
     } 
     // 2. Try finding the largest JSON object (from first { to last })
     else {
@@ -169,13 +169,13 @@ async function callAgent<T>(
         const end = text.lastIndexOf('}');
         if (start !== -1 && end !== -1 && end > start) {
             jsonText = text.substring(start, end + 1);
-            /* logger?.debug(`📋 Extracted JSON from object boundaries`, {
+            logger?.debug(`📋 Extracted JSON from object boundaries`, {
                 originalLength: text.length,
                 extractedLength: jsonText.length,
                 boundaries: { start, end },
                 type: "JSON_EXTRACTION",
                 runId: runId,
-            }); */
+            });
         }
         // 3. Try finding JSON after common prefixes
         else {
@@ -189,13 +189,13 @@ async function callAgent<T>(
                 const match = text.match(pattern);
                 if (match && match[1] && match[1].trim().length > 10) {
                     jsonText = match[1].trim();
-                    /* logger?.debug(`📋 Extracted JSON using pattern matching`, {
+                    logger?.debug(`📋 Extracted JSON using pattern matching`, {
                         originalLength: text.length,
                         extractedLength: jsonText.length,
                         pattern: pattern.toString(),
                         type: "JSON_EXTRACTION",
                         runId: runId,
-                    }); */
+                    });
                     break;
                 }
             }
@@ -204,12 +204,12 @@ async function callAgent<T>(
     
     // Validate extraction quality
     if (jsonText.length < 10 || jsonText === "..." || !jsonText.includes('{')) {
-        /* logger?.warn(`⚠️ Poor JSON extraction quality`, {
+        logger?.warn(`⚠️ Poor JSON extraction quality`, {
             extractedLength: jsonText.length,
             preview: jsonText.substring(0, 100),
             type: "JSON_EXTRACTION",
             runId: runId,
-        }); */
+        });
         throw new Error(`Failed to extract valid JSON from agent response. Preview: ${text.substring(0, 500)}...`);
     }
     
@@ -217,21 +217,21 @@ async function callAgent<T>(
         const parsed = JSON.parse(jsonText);
         const validated = schema.parse(parsed);
         
-        /* logger?.debug(`✅ JSON parsing and validation successful`, {
+        logger?.debug(`✅ JSON parsing and validation successful`, {
             jsonLength: jsonText.length,
             validatedKeys: typeof validated === 'object' && validated !== null ? Object.keys(validated as object).length : 0,
             type: "JSON_VALIDATION",
             runId: runId,
-        }); */
+        });
         
         return validated;
     } catch (parseError) {
-        /* logger?.error(`❌ JSON parsing failed, attempting recovery`, {
+        logger?.error(`❌ JSON parsing failed, attempting recovery`, {
             parseError: parseError instanceof Error ? parseError.message : 'Unknown error',
             jsonText: jsonText.substring(0, 500),
             type: "JSON_ERROR",
             runId: runId,
-        }); */
+        });
         
         // Recovery attempt: try to fix common JSON issues
         let recoveredJson = jsonText;
@@ -253,22 +253,22 @@ async function callAgent<T>(
             const parsed = JSON.parse(recoveredJson);
             const validated = schema.parse(parsed);
             
-            /* logger?.info(`✅ JSON recovery successful`, {
+            logger?.info(`✅ JSON recovery successful`, {
                 originalLength: jsonText.length,
                 recoveredLength: recoveredJson.length,
                 type: "JSON_RECOVERY",
                 runId: runId,
-            }); */
+            });
             
             return validated;
         } catch (recoveryError) {
-            /* logger?.error(`❌ JSON parsing and recovery both failed`, {
+            logger?.error(`❌ JSON parsing and recovery both failed`, {
                 originalError: parseError instanceof Error ? parseError.message : 'Unknown error',
                 recoveryError: recoveryError instanceof Error ? recoveryError.message : 'Unknown error',
                 fullResponse: text.substring(0, 1000),
                 type: "JSON_ERROR",
                 runId: runId,
-            }); */
+            });
             
             throw new Error(`JSON parsing failed after recovery attempt. Original: ${parseError instanceof Error ? parseError.message : 'Unknown error'}`);
         }
@@ -292,11 +292,11 @@ async function savePlanResults(containerId: string, planData: any, logger?: any)
             exec(cpCmd, (cpErr, _cpOut, cpErrOut) => {
                 try { if (tempFilePath) unlinkSync(tempFilePath); } catch {}
                 if (cpErr) {
-                    /* logger?.warn("⚠️ Failed to save plan results", {
+                    logger?.warn("⚠️ Failed to save plan results", {
                         saveFilePath,
                         error: cpErrOut || cpErr.message,
                         type: "PLAN_SAVE"
-                    }); */
+                    });
                     resolve();
                     return;
                 }
@@ -304,29 +304,29 @@ async function savePlanResults(containerId: string, planData: any, logger?: any)
                 const verifyCmd = `docker exec ${containerId} bash -lc "test -f ${saveFilePath} && wc -c ${saveFilePath}"`;
                 exec(verifyCmd, (vErr, vOut, vErrOut) => {
                     if (vErr) {
-                        /* logger?.warn("⚠️ Plan file verification failed", {
+                        logger?.warn("⚠️ Plan file verification failed", {
                             saveFilePath,
                             error: vErrOut || vErr.message,
                             type: "PLAN_SAVE"
-                        }); */
+                        });
                     } else {
-                        /* logger?.info("💾 Plan results saved to static file", {
+                        logger?.info("💾 Plan results saved to static file", {
                             saveFilePath,
                             containerId: containerId.substring(0, 12),
                             size: vOut.trim(),
                             type: "PLAN_SAVE"
-                        }); */
+                        });
                     }
                     resolve();
                 });
             });
         } catch (error) {
             try { if (tempFilePath) unlinkSync(tempFilePath); } catch {}
-            /* logger?.warn("⚠️ Failed to create temp plan file", {
+            logger?.warn("⚠️ Failed to create temp plan file", {
                 saveFilePath,
                 error: error instanceof Error ? error.message : 'Unknown error',
                 type: "PLAN_SAVE"
-            }); */
+            });
             resolve();
         }
     });
@@ -347,38 +347,38 @@ async function loadPlanResults(containerId: string, logger?: any): Promise<any |
             exec(`docker exec ${containerId} bash -lc "test -f ${saveFilePath} && cat ${saveFilePath} || echo 'NOT_FOUND'"`, 
                 (error, stdout, stderr) => {
                     if (error || stderr || stdout.trim() === 'NOT_FOUND') {
-                        /* logger?.debug("No saved plan found", {
+                        logger?.debug("No saved plan found", {
                             saveFilePath,
                             type: "PLAN_LOAD"
-                        }); */
+                        });
                         resolve(null);
                         return;
                     }
                     
                     try {
                         const planData = JSON.parse(stdout.trim());
-                        /* logger?.info("📂 Loaded saved plan results statically", {
+                        logger?.info("📂 Loaded saved plan results statically", {
                             saveFilePath,
                             containerId: containerId.substring(0, 12),
                             highPriorityModules: planData.repoAnalysis?.sourceModules?.filter((m: any) => m.priority === 'high')?.length || 0,
                             type: "PLAN_LOAD"
-                        }); */
+                        });
                         resolve(planData);
                     } catch (parseError) {
-                        /* logger?.warn("Failed to parse saved plan", {
+                        logger?.warn("Failed to parse saved plan", {
                             parseError: parseError instanceof Error ? parseError.message : 'Unknown error',
                             type: "PLAN_LOAD"
-                        }); */
+                        });
                         resolve(null);
                     }
                 }
             );
         });
     } catch (error) {
-        /* logger?.debug("Error loading plan results", {
+        logger?.debug("Error loading plan results", {
             error: error instanceof Error ? error.message : 'Unknown error',
             type: "PLAN_LOAD"
-        }); */
+        });
         return null;
     }
 }
@@ -415,13 +415,13 @@ export const checkSavedPlanStep = createStep({
             subtitle: "Looking for cached plan results",
         });
         
-        /* logger?.info("⚡ Step 0/3: Fast check for saved plan", {
+        logger?.info("⚡ Step 0/3: Fast check for saved plan", {
             step: "0/3",
             stepName: "Check Saved Plan",
             containerId: containerId.substring(0, 12),
             type: "WORKFLOW_STEP",
             runId: runId,
-        }); */
+        });
 
         // Try to load saved plan statically (no agent calls)
         const savedPlan = await loadPlanResults(containerId, logger);
@@ -429,14 +429,14 @@ export const checkSavedPlanStep = createStep({
         if (savedPlan && savedPlan.repoAnalysis && savedPlan.testSpecs) {
             const highPriorityModules = savedPlan.repoAnalysis.sourceModules?.filter((m: any) => m.priority === 'high') || [];
             
-            /* logger?.info("✅ Step 0/3: Found saved plan, skipping to test generation", {
+            logger?.info("✅ Step 0/3: Found saved plan, skipping to test generation", {
                 step: "0/3", 
                 highPriorityModules: highPriorityModules.length,
                 testSpecs: savedPlan.testSpecs?.length || 0,
                 testingFramework: savedPlan.repoAnalysis.testingFramework,
                 type: "WORKFLOW_STEP",
                 runId: runId,
-            }); */
+            });
 
             await notifyStepStatus({
                 stepId: "check-saved-plan-step",
@@ -456,11 +456,11 @@ export const checkSavedPlanStep = createStep({
                 skipToGeneration: true,
             };
         } else {
-            /* logger?.info("📋 Step 0/3: No saved plan found, proceeding with planning", {
+            logger?.info("📋 Step 0/3: No saved plan found, proceeding with planning", {
                 step: "0/3",
                 type: "WORKFLOW_STEP", 
                 runId: runId,
-            }); */
+            });
 
             await notifyStepStatus({
                 stepId: "check-saved-plan-step",
@@ -508,12 +508,12 @@ export const loadContextAndPlanStep = createStep({
         // If we have saved plan, skip this step
         if (skipToGeneration && repoAnalysis && testSpecs) {
         const logger = ALERTS_ONLY ? null : mastra?.getLogger();
-            /* logger?.info("⏭️ Step 1/3: Skipping planning (using saved plan)", {
+            logger?.info("⏭️ Step 1/3: Skipping planning (using saved plan)", {
                 step: "1/3",
                 stepName: "Load Context & Plan (Skipped)",
                 type: "WORKFLOW_STEP",
                 runId: runId,
-            }); */
+            });
             
             return {
             containerId,
@@ -533,14 +533,14 @@ export const loadContextAndPlanStep = createStep({
 
         const logger = ALERTS_ONLY ? null : mastra?.getLogger();
         
-        /* logger?.info("📋 Step 1/3: Loading context and planning high-priority testing strategy", {
+        logger?.info("📋 Step 1/3: Loading context and planning high-priority testing strategy", {
             step: "1/3",
             stepName: "Load Context & Plan (MVP)",
             containerId,
             contextPath,
             type: "WORKFLOW_STEP",
             runId: runId,
-        }); */
+        });
 
                 const prompt = `CRITICAL: Return ONLY valid JSON. No explanations, no comments.
 
@@ -663,7 +663,7 @@ RETURN FORMAT (JSON only - comprehensive analysis):
                 )
             );
             
-            /* logger?.info("✅ Step 1/3: MVP plan created for high priority module", {
+            logger?.info("✅ Step 1/3: MVP plan created for high priority module", {
                 step: "1/3",
                 selectedModule: highPriorityModules[0].modulePath,
                 sourceFiles: highPriorityModules[0].sourceFiles,
@@ -671,7 +671,7 @@ RETURN FORMAT (JSON only - comprehensive analysis):
                 testingFramework: mvpAnalysis.testingFramework,
                 type: "WORKFLOW_STEP",
                 runId: runId,
-            }); */
+            });
 
             // Save plan results to static file for fast resume
             const planData = {
@@ -689,19 +689,19 @@ RETURN FORMAT (JSON only - comprehensive analysis):
                 testSpecs: mvpTestSpecs,
             };
         } catch (error) {
-            /* logger?.error("❌ Step 1/3: Planning failed", {
+            logger?.error("❌ Step 1/3: Planning failed", {
                 step: "1/3",
                 error: error instanceof Error ? error.message : 'Unknown error',
                 type: "WORKFLOW_STEP",
                 runId: runId,
-            }); */
+            });
 
-            /* logger?.warn("🔄 Using fallback MVP plan", {
+            logger?.warn("🔄 Using fallback MVP plan", {
                 step: "1/3",
                 action: "fallback",
                 type: "WORKFLOW_STEP",
                 runId: runId,
-            }); */
+            });
 
                         // Return comprehensive fallback plan for MVP
             const fallbackAnalysis = {
@@ -779,12 +779,12 @@ async function retryTestGeneration(
         throw new Error("Cannot retry test generation without test specifications");
     }
 
-    /* logger?.info("🔄 Initiating test generation retry with error feedback", {
+    logger?.info("🔄 Initiating test generation retry with error feedback", {
         retryCount,
         hasErrorFeedback: !!errorFeedback,
         type: "RETRY_GENERATION",
         runId: runId,
-    }); */
+    });
 
     const testSpec = testSpecs[0];
     const sourceFile = testSpec.sourceFile;
@@ -886,7 +886,7 @@ RETURN FORMAT (JSON only - MUST return accurate counts after corrections):
             correctionsMade: z.string().optional(),
         }), 700, runId, logger); // More steps for retry with corrections
 
-        /* logger?.info("✅ Retry test generation completed", {
+        logger?.info("✅ Retry test generation completed", {
             retryCount,
             success: retryResult.success,
             testFile: retryResult.testFile,
@@ -895,7 +895,7 @@ RETURN FORMAT (JSON only - MUST return accurate counts after corrections):
             correctionsMade: retryResult.correctionsMade?.substring(0, 100),
             type: "RETRY_GENERATION",
             runId: runId,
-        }); */
+        });
 
         // Create test generation result for retry
         const retryTestGeneration: z.infer<typeof TestGenerationResult> = {
@@ -931,12 +931,12 @@ RETURN FORMAT (JSON only - MUST return accurate counts after corrections):
         };
 
     } catch (error) {
-        /* logger?.error("❌ Retry test generation failed", {
+        logger?.error("❌ Retry test generation failed", {
             retryCount,
             error: error instanceof Error ? error.message : 'Unknown error',
             type: "RETRY_GENERATION",
             runId: runId,
-        }); */
+        });
 
         // Return failed result for retry
         const failedRetryResult = {
@@ -1000,16 +1000,16 @@ Instructions:
             message: z.string(),
         }), 50, undefined, logger);
         
-        /* logger?.info(`💾 Checkpoint saved for block ${blockId}`, {
+        logger?.info(`💾 Checkpoint saved for block ${blockId}`, {
             checkpointFile,
             blockId,
             type: "CHECKPOINT_SAVE"
-        }); */
+        });
     } catch (error) {
-        /* logger?.warn(`⚠️ Failed to save checkpoint for block ${blockId}`, {
+        logger?.warn(`⚠️ Failed to save checkpoint for block ${blockId}`, {
             error: error instanceof Error ? error.message : 'Unknown error',
             type: "CHECKPOINT_SAVE"
-        }); */
+        });
     }
 }
 
@@ -1039,14 +1039,14 @@ export const generateTestCodeStep = createStep({
         const { containerId, repoAnalysis, testSpecs } = inputData;
         const logger = mastra?.getLogger();
         
-        /* logger?.info("🧪 Step 2/3: Simple test generation (MVP validation)", {
+        logger?.info("🧪 Step 2/3: Simple test generation (MVP validation)", {
             step: "2/3",
             stepName: "Simple Test Generation",
             sourceFile: testSpecs[0]?.sourceFile || "unknown",
             framework: repoAnalysis.testingFramework,
             type: "WORKFLOW_STEP",
             runId: runId,
-        }); */
+        });
 
         const testSpec = testSpecs[0];
         if (!testSpec) {
@@ -1216,23 +1216,23 @@ RETURN FORMAT (JSON only - MUST return accurate counts):
 
             // Validate that the agent used the correct test file path
             if (result.testFile !== testFile) {
-                /* logger?.error("❌ Agent used wrong test file path", {
+                logger?.error("❌ Agent used wrong test file path", {
                     expected: testFile,
                     actual: result.testFile,
                     type: "VALIDATION_ERROR",
                 runId: runId,
-            }); */
+            });
                 throw new Error(`Agent created test file at wrong path. Expected: ${testFile}, Got: ${result.testFile}`);
             }
 
             // The agent instructions now include verification steps, so we rely on those
-            /* logger?.info("✅ Test file creation delegated to agent with explicit verification", {
+            logger?.info("✅ Test file creation delegated to agent with explicit verification", {
                 testFile: testFile,
                 type: "DELEGATION_INFO",
                 runId: runId,
-            }); */
+            });
 
-            /* logger?.info("✅ Step 2/3: Simple test generation completed", {
+            logger?.info("✅ Step 2/3: Simple test generation completed", {
                 step: "2/3",
                 testFile: result.testFile,
                 success: result.success,
@@ -1240,7 +1240,7 @@ RETURN FORMAT (JSON only - MUST return accurate counts):
                 testCasesCount: result.testCasesCount,
                 type: "WORKFLOW_STEP",
                 runId: runId,
-            }); */
+            });
 
             await notifyStepStatus({
                 stepId: "generate-test-code-step",
@@ -1277,12 +1277,12 @@ RETURN FORMAT (JSON only - MUST return accurate counts):
                 testSpecs: [testSpec],
             };
         } catch (error) {
-            /* logger?.error("❌ Step 2/3: Simple test generation failed", {
+            logger?.error("❌ Step 2/3: Simple test generation failed", {
                 step: "2/3",
                 error: error instanceof Error ? error.message : 'Unknown error',
                 type: "WORKFLOW_STEP",
                 runId: runId,
-            }); */
+            });
 
             await notifyStepStatus({
                 stepId: "generate-test-code-step",
@@ -1361,7 +1361,7 @@ export const finalizeStep = createStep({
             subtitle: "Validation and recommendations",
         });
         
-        /* logger?.info("🔍 Step 3/3: Enhanced finalization with syntax validation and retry logic", {
+        logger?.info("🔍 Step 3/3: Enhanced finalization with syntax validation and retry logic", {
             step: "3/3",
             stepName: "Enhanced Finalize with Validation",
             testFileGenerated: testGeneration.testFiles.length,
@@ -1370,18 +1370,18 @@ export const finalizeStep = createStep({
             hasLastError: !!lastError,
             type: "WORKFLOW_STEP",
             runId: runId,
-        }); */
+        });
 
         // If we have failed files, check if we should retry
         if (testGeneration.summary.failedFiles > 0 && retryCount < maxRetries && repoAnalysis && testSpecs) {
-            /* logger?.warn("⚠️ Test generation had failures, initiating retry with error feedback", {
+            logger?.warn("⚠️ Test generation had failures, initiating retry with error feedback", {
                 step: "3/3",
                 failedFiles: testGeneration.summary.failedFiles,
                 retryCount: retryCount + 1,
                 lastError: lastError?.substring(0, 200),
                 type: "WORKFLOW_STEP",
                 runId: runId,
-            }); */
+            });
 
             // Prepare retry with error feedback
             return await retryTestGeneration(containerId, repoAnalysis, testSpecs, retryCount + 1, lastError, mastra, runId, logger);
@@ -1391,13 +1391,13 @@ export const finalizeStep = createStep({
         if (testGeneration.summary.successfulFiles > 0) {
             const testFile = testGeneration.testFiles[0];
             
-            /* logger?.info("✅ Phase 1: Syntax and execution validation", {
+            logger?.info("✅ Phase 1: Syntax and execution validation", {
                 step: "3/3",
                 phase: "validation",
                 testFile: testFile?.testFile,
                 type: "WORKFLOW_STEP",
                 runId: runId,
-            }); */
+            });
 
             const validationPrompt = `CRITICAL: Validate test file syntax and execution using docker_exec with containerId='${containerId}'.
 
@@ -1451,24 +1451,24 @@ RETURN VALIDATION RESULTS (JSON only):
                     recommendations: z.array(z.string()),
                 }), 300, runId, logger);
 
-                /* logger?.info("📊 Validation results received", {
+                logger?.info("📊 Validation results received", {
                     syntaxValid: validationResult.syntaxValid,
                     executionSuccessful: validationResult.executionSuccessful,
                     hasErrors: !!validationResult.errorDetails,
                     needsRetry: validationResult.needsRetry,
                     type: "WORKFLOW_STEP",
                     runId: runId,
-                }); */
+                });
 
                 // If validation failed and we can retry, do so
                 if (validationResult.needsRetry && retryCount < maxRetries && validationResult.errorDetails && repoAnalysis && testSpecs) {
-                    /* logger?.warn("🔄 Validation failed, initiating retry with detailed error feedback", {
+                    logger?.warn("🔄 Validation failed, initiating retry with detailed error feedback", {
                         step: "3/3",
                         retryCount: retryCount + 1,
                         errorDetails: validationResult.errorDetails.substring(0, 200),
                         type: "WORKFLOW_STEP",
                         runId: runId,
-                    }); */
+                    });
 
                     return await retryTestGeneration(containerId, repoAnalysis, testSpecs, retryCount + 1, validationResult.errorDetails, mastra, runId, logger);
                 }
@@ -1479,12 +1479,12 @@ RETURN VALIDATION RESULTS (JSON only):
                 testGeneration.quality.coverageScore = validationResult.executionSuccessful ? 85 : 50;
 
             } catch (validationError) {
-                /* logger?.warn("⚠️ Validation step failed, proceeding with basic assessment", {
+                logger?.warn("⚠️ Validation step failed, proceeding with basic assessment", {
                     step: "3/3",
                     error: validationError instanceof Error ? validationError.message : 'Unknown error',
                     type: "WORKFLOW_STEP",
                     runId: runId,
-                }); */
+                });
             }
         }
 
@@ -1538,7 +1538,7 @@ RETURN VALIDATION RESULTS (JSON only):
                 : `⚠️ MVP test generation completed with syntax warnings: ${testGeneration.testFiles[0]?.testFile || 'test file'} created but needs review`
             : `❌ Enhanced MVP test generation failed after ${retryCount} retry attempts - check logs for details`;
 
-        /* logger?.info("🏁 Step 3/3: Enhanced MVP test generation workflow completed", {
+        logger?.info("🏁 Step 3/3: Enhanced MVP test generation workflow completed", {
             step: "3/3",
             success: testGeneration.summary.successfulFiles > 0,
             syntaxValid: testGeneration.quality.syntaxValid,
@@ -1550,7 +1550,7 @@ RETURN VALIDATION RESULTS (JSON only):
             retryCount,
             type: "WORKFLOW_STEP",
             runId: runId,
-        }); */
+        });
 
         const output = {
             result,

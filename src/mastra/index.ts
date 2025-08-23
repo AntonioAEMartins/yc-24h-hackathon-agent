@@ -1,5 +1,6 @@
 
 import { Mastra } from '@mastra/core/mastra';
+import { registerApiRoute } from '@mastra/core/server';
 import { PinoLogger } from '@mastra/loggers';
 import type { LogLevel } from '@mastra/loggers';
 import { LibSQLStore } from '@mastra/libsql';
@@ -17,6 +18,9 @@ import { gatherContextWorkflow } from './workflows/test/02-gather-context-workfl
 import { generateUnitTestsWorkflow } from './workflows/test/03-generate-unit-tests-workflow';
 // import { unitTestWorkflow } from './workflows/unit-test-workflow';
 import { fullPipelineWorkflow } from './workflows/full-pipeline-workflow';
+import { writeFileSync } from 'fs';
+import path from 'path';
+import { associateRunWithProject } from './tools/alert-notifier';
 
 // Runtime log/telemetry controls
 const LOG_MODE = process.env.LOG_MODE || process.env.MASTRA_LOG_MODE || (process.env.ALERTS_ONLY === 'true' ? 'alerts_only' : 'default');
@@ -47,20 +51,80 @@ export const mastra = new Mastra({
     // stores telemetry, evals, ... into memory storage, if it needs to persist, change to file:../mastra.db
     url: ":memory:",
   }),
-  // logger: new PinoLogger({
-  //   name: 'Mastra',
-  //   // Set to 'silent' when running in alerts-only mode to suppress all logs except notifyStepStatus
-  //   level: getLogLevel(),
-  // }),
-  // telemetry: {
-  //   serviceName: 'yc-24h-hackathon-agent',
-  //   // Disable telemetry entirely when alerts-only mode is enabled
-  //   enabled: !ALERTS_ONLY,
-  //   sampling: {
-  //     type: 'always_on', // Capture all traces for development
-  //   },
-  //   export: {
-  //     type: 'console', // Console output for development
-  //   },
-  // },
+  server: {
+    apiRoutes: [
+      registerApiRoute('/start-full-pipeline', {
+        method: 'POST',
+        handler: async (c) => {
+          try {
+            const body = await c.req.json().catch(() => ({}));
+            const authHeader = c.req.header('authorization') || c.req.header('Authorization');
+            const headerToken = authHeader && authHeader.startsWith('Bearer ')
+              ? authHeader.slice(7).trim()
+              : undefined;
+            const githubAccessToken = headerToken || body.token || body.githubToken || body.github_access_token || body.GITHUB_PAT;
+            const contextData = body.contextData ?? body;
+            const projectId: string | undefined = body.projectId || body.projectID || body.project_id;
+
+            if (!githubAccessToken || typeof githubAccessToken !== 'string') {
+              return c.json({ error: 'Missing required GitHub access token in body (token | githubToken | github_access_token | GITHUB_PAT)' }, 400);
+            }
+
+            const credentialsContent = `GITHUB_PAT=${githubAccessToken}\n`;
+
+            const cwd = process.cwd();
+            const primaryPath = path.resolve(cwd, '.docker.credentials');
+            const fallbackPath = path.resolve(cwd, '..', '..', '.docker.credentials');
+
+            try { writeFileSync(primaryPath, credentialsContent, 'utf8'); } catch {}
+            try { writeFileSync(fallbackPath, credentialsContent, 'utf8'); } catch {}
+
+            const workflow = (c.get('mastra') as typeof mastra).getWorkflow('fullPipelineWorkflow');
+            const run = await workflow.createRunAsync();
+
+            if (projectId && typeof projectId === 'string') {
+              associateRunWithProject(run.runId, projectId);
+            }
+
+            // Fire-and-forget with visible logging
+            setImmediate(() => {
+              try {
+                console.log(`[start-full-pipeline] Starting run ${run.runId}`);
+                run.start({ inputData: { contextData } })
+                  .then((result: any) => {
+                    console.log(`[start-full-pipeline] Run ${run.runId} completed with status: ${result.status}`);
+                  })
+                  .catch((err: any) => {
+                    console.error(`[start-full-pipeline] Run ${run.runId} failed:`, err);
+                  });
+              } catch (err) {
+                console.error(`[start-full-pipeline] Failed to schedule run ${run.runId}:`, err);
+              }
+            });
+
+            return c.json({ message: 'fullPipelineWorkflow started', runId: run.runId });
+          } catch (err) {
+            const message = err instanceof Error ? err.message : 'Unknown error';
+            return c.json({ error: message }, 500);
+          }
+        }
+      })
+    ]
+  },
+  logger: new PinoLogger({
+    name: 'Mastra',
+    // Set to 'silent' when running in alerts-only mode to suppress all logs except notifyStepStatus
+    level: getLogLevel(),
+  }),
+  telemetry: {
+    serviceName: 'yc-24h-hackathon-agent',
+    // Disable telemetry entirely when alerts-only mode is enabled
+    enabled: !ALERTS_ONLY,
+    sampling: {
+      type: 'always_on', // Capture all traces for development
+    },
+    export: {
+      type: 'console', // Console output for development
+    },
+  },
 });

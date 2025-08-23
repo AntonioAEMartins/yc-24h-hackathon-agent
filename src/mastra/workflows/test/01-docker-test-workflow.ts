@@ -106,6 +106,7 @@ export const testDockerGithubCloneStep = createStep({
         toolCallCount: z.number().describe("Total number of tool calls made during execution"),
         containerId: z.string().describe("The ID of the created Docker container"),
         contextData: z.any().optional().describe("Context data passed through"),
+        repoPath: z.string().describe("Absolute path to the cloned repository inside the container"),
     }),
     execute: async ({ inputData, runId }) => {
         await notifyStepStatus({
@@ -129,6 +130,26 @@ export const testDockerGithubCloneStep = createStep({
                 return;
             }
 
+            // Determine repository coordinates from contextData
+            const context: any = (inputData as any)?.contextData || {};
+            let repoOwner: string | undefined = typeof context.owner === 'string' ? context.owner : undefined;
+            let repoName: string | undefined = typeof context.repo === 'string' ? context.repo : undefined;
+            const fullName: string | undefined = typeof context.fullName === 'string' ? context.fullName : (typeof context.full_name === 'string' ? context.full_name : undefined);
+            if ((!repoOwner || !repoName) && fullName && fullName.includes('/')) {
+                const [ownerPart, repoPart] = fullName.split('/');
+                repoOwner = repoOwner || ownerPart;
+                repoName = repoName || repoPart;
+            }
+            const resolvedRepoPath = (repoOwner && repoName) ? `${repoOwner}/${repoName}` : 'AntonioAEMartins/yc-24h-hackathon-agent';
+            const defaultBranch: string | undefined = typeof context.defaultBranch === 'string' ? context.defaultBranch : (typeof context.default_branch === 'string' ? context.default_branch : undefined);
+            const branchArg = defaultBranch ? ` --branch ${defaultBranch} ` : ' ';
+
+            // Compute expected repo path in the container
+            const inferredRepoName = (repoName && typeof repoName === 'string')
+                ? repoName.replace(/\.git$/, '')
+                : 'yc-24h-hackathon-agent';
+            const inferredRepoPath = `/app/${inferredRepoName}`;
+
             // First, copy the credentials file to the container
             const copyCmd = `docker cp "${credentialsPath}" ${inputData.containerId}:/root/.docker.credentials`;
             
@@ -147,8 +168,8 @@ export const testDockerGithubCloneStep = createStep({
                         return;
                     }
 
-                    // Now execute the git clone command
-                    const execCmd = `docker exec ${inputData.containerId} bash -c "set -e; TOKEN=\\$(grep GITHUB_PAT /root/.docker.credentials | cut -d'=' -f2 | tr -d '[:space:]'); if [ -z \\"\\\$TOKEN\\" ]; then echo 'Error: GITHUB_PAT not found or empty in credentials file'; exit 1; fi; cd /app; git clone https://x-access-token:\\$TOKEN@github.com/AntonioAEMartins/yc-24h-hackathon-agent.git; rm -f /root/.docker.credentials; echo 'Repository cloned successfully'"`;
+                    // Now execute the git clone command with dynamic repo and optional branch
+                    const execCmd = `docker exec ${inputData.containerId} bash -c "set -e; TOKEN=\\$(grep GITHUB_PAT /root/.docker.credentials | cut -d'=' -f2 | tr -d '[:space:]'); if ( [ -z \"\\\$TOKEN\" ] ); then echo 'Error: GITHUB_PAT not found or empty in credentials file'; exit 1; fi; cd /app; git clone${branchArg}https://x-access-token:\\$TOKEN@github.com/${resolvedRepoPath}.git; rm -f /root/.docker.credentials; echo 'Repository cloned successfully'"`;
                     
                     exec(execCmd, (execError, execStdout, execStderr) => {
                         if (execError) {
@@ -169,6 +190,7 @@ export const testDockerGithubCloneStep = createStep({
                                 toolCallCount: cliToolMetrics.callCount,
                                 containerId: inputData.containerId,
                                 contextData: inputData.contextData,
+                                repoPath: inferredRepoPath,
                             });
                         }
                     });
@@ -186,6 +208,7 @@ export const saveContextStep = createStep({
         toolCallCount: z.number().describe("Total number of tool calls made during execution"),
         containerId: z.string().describe("The ID of the created Docker container"),
         contextData: z.any().optional().describe("Context data to save to the container"),
+        repoPath: z.string().describe("Absolute path to the cloned repository inside the container"),
     }),
     outputSchema: z.object({
         result: z.string().describe("The result of the Docker operation"),
@@ -193,9 +216,11 @@ export const saveContextStep = createStep({
         toolCallCount: z.number().describe("Total number of tool calls made during execution"),
         containerId: z.string().describe("The ID of the created Docker container"),
         contextPath: z.string().describe("Path where context was saved in the container"),
+        repoPath: z.string().describe("Absolute path to the cloned repository inside the container"),
     }),
     execute: async ({ inputData, mastra, runId }) => {
         const { containerId, contextData } = inputData;
+        const repoPath = (inputData as any)?.repoPath || '';
         const logger = ALERTS_ONLY ? null : mastra?.getLogger();
         const contextPath = "/app/agent.context.json";
         await notifyStepStatus({
@@ -207,23 +232,23 @@ export const saveContextStep = createStep({
             subtitle: `Writing ${contextData ? 'provided' : 'no'} context data`,
         });
         
-        /* logger?.info("💾 Starting code-based context save to Docker container", {
+        logger?.info("💾 Starting code-based context save to Docker container", {
             containerId: containerId.substring(0, 12),
             contextPath,
             hasContextData: !!contextData,
             type: "DOCKER_CONTEXT_SAVE",
             runId: runId,
-        }); */
+        });
 
         try {
             // Error if no context data provided - this indicates a workflow issue
             if (!contextData) {
                 const error = "No context data provided to saveContextStep - workflow execution error";
-                /* logger?.error("❌ Context data missing", {
+                logger?.error("❌ Context data missing", {
                     error,
                     type: "DOCKER_CONTEXT_SAVE",
                     runId: runId,
-                }); */
+                });
                 throw new Error(error);
             }
 
@@ -232,12 +257,12 @@ export const saveContextStep = createStep({
             // Convert context to JSON string
             const contextJson = JSON.stringify(contextToSave, null, 2);
             
-            /* logger?.debug("📝 Preparing to write context directly to container", {
+            logger?.debug("📝 Preparing to write context directly to container", {
                 contextSize: `${Math.round(contextJson.length / 1024)}KB`,
                 contextPath,
                 type: "DOCKER_CONTEXT_SAVE",
                 runId: runId,
-            }); */
+            });
 
             // Write context file to temp location then copy to Docker container (fast and reliable)
             return await new Promise((resolve, reject) => {
@@ -249,12 +274,12 @@ export const saveContextStep = createStep({
                     tempFilePath = path.join(tempDir, 'context.json');
                     writeFileSync(tempFilePath, contextJson, 'utf8');
                     
-                    /* logger?.debug("🐳 Copying context file to Docker container", {
+                    logger?.debug("🐳 Copying context file to Docker container", {
                         tempFilePath,
                         contextPath,
                         type: "DOCKER_CONTEXT_SAVE",
                         runId: runId,
-                    }); */
+                    });
 
                     // Copy file to container
                     const copyCmd = `docker cp "${tempFilePath}" ${containerId}:${contextPath}`;
@@ -265,21 +290,21 @@ export const saveContextStep = createStep({
                             try {
                                 unlinkSync(tempFilePath);
                             } catch (cleanupError) {
-                                /* logger?.warn("⚠️  Failed to cleanup temp file", {
+                                logger?.warn("⚠️  Failed to cleanup temp file", {
                                     tempFilePath,
                                     error: cleanupError instanceof Error ? cleanupError.message : 'Unknown error',
                                     type: "DOCKER_CONTEXT_SAVE",
                                     runId: runId,
-                                }); */
+                                });
                             }
                         }
 
                         if (copyError) {
-                            /* logger?.error("❌ Failed to copy context file to container", {
+                            logger?.error("❌ Failed to copy context file to container", {
                                 error: copyStderr || copyError.message,
                                 type: "DOCKER_CONTEXT_SAVE",
                                 runId: runId,
-                            }); */
+                            });
                             reject(new Error(`Failed to copy context file to container: ${copyStderr || copyError.message}`));
                             return;
                         }
@@ -289,24 +314,24 @@ export const saveContextStep = createStep({
                         
                         exec(verifyCmd, (verifyError, verifyStdout, verifyStderr) => {
                             if (verifyError) {
-                                /* logger?.error("❌ Context file verification failed", {
+                                logger?.error("❌ Context file verification failed", {
                                     error: verifyStderr || verifyError.message,
                                     type: "DOCKER_CONTEXT_SAVE",
                                     runId: runId,
-                                }); */
+                                });
                                 reject(new Error(`Context file verification failed: ${verifyStderr || verifyError.message}`));
                                 return;
                             }
 
                             const fileSize = verifyStdout.trim().split(' ')[0] || '0';
-                            /* logger?.info("✅ Context file successfully saved to Docker container", {
+                            logger?.info("✅ Context file successfully saved to Docker container", {
                                 containerId: containerId.substring(0, 12),
                                 contextPath,
                                 fileSize: `${parseInt(fileSize)} bytes`,
                                 contextSize: `${Math.round(contextJson.length / 1024)}KB`,
                                 type: "DOCKER_CONTEXT_SAVE",
                                 runId: runId,
-                            }); */
+                            });
 
                             notifyStepStatus({
                                 stepId: "save-context-step",
@@ -325,6 +350,7 @@ export const saveContextStep = createStep({
                                 toolCallCount: cliToolMetrics.callCount,
                                 containerId,
                                 contextPath,
+                                repoPath: repoPath || "/app",
                             });
                         });
                     });
@@ -338,21 +364,21 @@ export const saveContextStep = createStep({
                         }
                     }
                     
-                    /* logger?.error("❌ Failed to create temp file for context", {
+                    logger?.error("❌ Failed to create temp file for context", {
                         error: tempError instanceof Error ? tempError.message : 'Unknown error',
                         type: "DOCKER_CONTEXT_SAVE",
                         runId: runId,
-                    }); */
+                    });
                     reject(new Error(`Failed to create temp file: ${tempError instanceof Error ? tempError.message : 'Unknown error'}`));
                 }
             });
 
         } catch (error) {
-            /* logger?.error("❌ Context save operation failed", {
+            logger?.error("❌ Context save operation failed", {
                 error: error instanceof Error ? error.message : 'Unknown error',
                 type: "DOCKER_CONTEXT_SAVE",
                 runId: runId,
-            }); */
+            });
 
             await notifyStepStatus({
                 stepId: "save-context-step",
@@ -372,6 +398,7 @@ export const saveContextStep = createStep({
                 toolCallCount: cliToolMetrics.callCount,
                 containerId,
                 contextPath,
+                repoPath: repoPath || "/app",
             };
         }
     }
@@ -389,5 +416,6 @@ export const testDockerWorkflow = createWorkflow({
         toolCallCount: z.number().describe("Total number of tool calls made during execution"),
         containerId: z.string().describe("The ID of the created Docker container"),
         contextPath: z.string().describe("Path where context was saved in the container"),
+        repoPath: z.string().describe("Absolute path to the cloned repository inside the container"),
     }),
 }).then(testDockerStep).then(testDockerGithubCloneStep).then(saveContextStep).commit();

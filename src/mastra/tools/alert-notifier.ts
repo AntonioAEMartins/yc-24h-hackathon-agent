@@ -18,7 +18,7 @@ export const AlertEventSchema = z.object({
     source: z.string().optional().default('mastra-agent'),
 
     // Correlation identifiers
-    workflowId: z.string().optional(),
+    projectId: z.string().optional(),
     runId: z.string().optional(),
     stepId: z.string().optional(),
     status: AlertStatusSchema.optional(), // starting | in_progress | completed | failed
@@ -33,6 +33,18 @@ export const AlertEventSchema = z.object({
     timestamp: z.string().datetime().optional(),
 });
 export type AlertEventPayload = z.infer<typeof AlertEventSchema>;
+
+// In-memory association between a run and the project it belongs to.
+// This lets us enrich alerts with projectId without forcing every step to pass it explicitly.
+const runIdToProjectId = new Map<string, string>();
+export function associateRunWithProject(runId: string, projectId: string): void {
+    if (runId && projectId) {
+        runIdToProjectId.set(runId, projectId);
+    }
+}
+export function getProjectIdForRun(runId?: string): string | undefined {
+    return runId ? runIdToProjectId.get(runId) : undefined;
+}
 
 function getAlertsApiUrl(): string {
     // Prefer explicit env var; default to conventional Next.js API route
@@ -74,7 +86,7 @@ export async function notifyStepStatus(params: {
     stepId: string;
     status: AlertStatus;
     runId?: string;
-    workflowId?: string;
+    projectId?: string;
     containerId?: string;
     contextPath?: string;
     toolCallCount?: number;
@@ -83,7 +95,10 @@ export async function notifyStepStatus(params: {
     subtitle?: string;
     metadata?: Record<string, any>;
 }): Promise<void> {
-    const { stepId, status, runId, workflowId, containerId, contextPath, toolCallCount, level, title, subtitle, metadata } = params;
+    const { stepId, status, runId, projectId: paramProjectId, containerId, contextPath, toolCallCount, level, title, subtitle, metadata } = params;
+
+    // Resolve projectId from param or association map
+    const projectId = paramProjectId || getProjectIdForRun(runId);
 
     // console.log("🔔 Notifying step status", {
     //     title: title || `[${stepId}] ${status}`,
@@ -104,7 +119,7 @@ export async function notifyStepStatus(params: {
         subtitle: subtitle || `Step ${stepId} is ${status}`,
         level: level || (status === 'failed' ? 'error' : status === 'completed' ? 'success' : 'info'),
         source: 'mastra-agent',
-        workflowId,
+        projectId,
         runId,
         stepId,
         status,
