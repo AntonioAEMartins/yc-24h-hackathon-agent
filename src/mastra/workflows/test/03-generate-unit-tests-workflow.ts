@@ -20,6 +20,7 @@ const ALERTS_ONLY = (process.env.ALERTS_ONLY === 'true') || (process.env.LOG_MOD
 const WorkflowInput = z.object({
     containerId: z.string().describe("Docker container ID where the repository is mounted"),
     contextPath: z.string().optional().default("/app/agent.context.json").describe("Path to the context file"),
+    projectId: z.string().describe("Project ID associated with this workflow run"),
 });
 
 /**
@@ -402,6 +403,7 @@ export const checkSavedPlanStep = createStep({
         repoAnalysis: RepoTestAnalysis.optional(),
         testSpecs: z.array(TestSpecification).optional(),
         skipToGeneration: z.boolean(),
+        projectId: z.string(),
     }),
     execute: async ({ inputData, mastra, runId }) => {
         const { containerId, contextPath } = inputData;
@@ -454,6 +456,7 @@ export const checkSavedPlanStep = createStep({
                 repoAnalysis: savedPlan.repoAnalysis,
                 testSpecs: savedPlan.testSpecs,
                 skipToGeneration: true,
+                projectId: inputData.projectId,
             };
         } else {
             logger?.info("📋 Step 0/3: No saved plan found, proceeding with planning", {
@@ -476,6 +479,7 @@ export const checkSavedPlanStep = createStep({
                 containerId,
                 contextPath,
                 skipToGeneration: false,
+                projectId: inputData.projectId,
             };
         }
     },
@@ -495,12 +499,14 @@ export const loadContextAndPlanStep = createStep({
         repoAnalysis: RepoTestAnalysis.optional(),
         testSpecs: z.array(TestSpecification).optional(),
         skipToGeneration: z.boolean(),
+        projectId: z.string(),
     }),
     outputSchema: z.object({
         containerId: z.string(),
         contextPath: z.string(),
         repoAnalysis: RepoTestAnalysis,
         testSpecs: z.array(TestSpecification),
+        projectId: z.string(),
     }),
     execute: async ({ inputData, mastra, runId }) => {
         const { containerId, contextPath, repoAnalysis, testSpecs, skipToGeneration } = inputData;
@@ -514,12 +520,23 @@ export const loadContextAndPlanStep = createStep({
                 type: "WORKFLOW_STEP",
                 runId: runId,
             });
+
+            await notifyStepStatus({
+                stepId: "load-context-and-plan-step",
+                status: "completed",
+                runId,
+                containerId,
+                title: "Load context & plan completed",
+                subtitle: "Skipped - using saved plan",
+                toolCallCount: cliToolMetrics.callCount,
+            });
             
             return {
-            containerId,
-            contextPath,
+                containerId,
+                contextPath,
                 repoAnalysis,
                 testSpecs,
+                projectId: inputData.projectId,
             };
         }
         await notifyStepStatus({
@@ -682,11 +699,22 @@ RETURN FORMAT (JSON only - comprehensive analysis):
             };
             await savePlanResults(containerId, planData, logger);
 
+            await notifyStepStatus({
+                stepId: "load-context-and-plan-step",
+                status: "completed",
+                runId,
+                containerId,
+                title: "Load context & plan completed",
+                subtitle: `MVP plan created for ${highPriorityModules[0].modulePath}`,
+                toolCallCount: cliToolMetrics.callCount,
+            });
+
             return {
                 containerId,
                 contextPath,
                 repoAnalysis: mvpAnalysis,
                 testSpecs: mvpTestSpecs,
+                projectId: inputData.projectId,
             };
         } catch (error) {
             logger?.error("❌ Step 1/3: Planning failed", {
@@ -752,11 +780,24 @@ RETURN FORMAT (JSON only - comprehensive analysis):
                 toolCallCount: cliToolMetrics.callCount,
             });
 
+            // Send completed status for fallback plan
+            await notifyStepStatus({
+                stepId: "load-context-and-plan-step",
+                status: "completed",
+                runId,
+                containerId,
+                title: "Load context & plan completed",
+                subtitle: "Using fallback MVP plan",
+                level: 'warning',
+                toolCallCount: cliToolMetrics.callCount,
+            });
+
             return {
                 containerId,
                 contextPath,
                 repoAnalysis: fallbackAnalysis,
                 testSpecs: fallbackTestSpecs,
+                projectId: inputData.projectId,
             };
         }
     },
@@ -772,9 +813,10 @@ async function retryTestGeneration(
     retryCount: number,
     errorFeedback: string | undefined,
     mastra: any,
+    projectId: string,
     runId?: string,
     logger?: any
-): Promise<z.infer<typeof UnitTestResult>> {
+): Promise<z.infer<typeof UnitTestResult> & { projectId: string }> {
     if (testSpecs.length === 0) {
         throw new Error("Cannot retry test generation without test specifications");
     }
@@ -928,6 +970,7 @@ RETURN FORMAT (JSON only - MUST return accurate counts after corrections):
                 ...(retryResult.correctionsMade ? [`Corrections applied: ${retryResult.correctionsMade}`] : []),
                 "Review error feedback and consider manual intervention if retries continue to fail"
             ],
+            projectId: projectId,
         };
 
     } catch (error) {
@@ -976,6 +1019,7 @@ RETURN FORMAT (JSON only - MUST return accurate counts after corrections):
                 "Review error patterns and consider manual test creation",
                 "Check Docker container and dependency availability"
             ],
+            projectId: projectId,
         };
     }
 }
@@ -1028,12 +1072,14 @@ export const generateTestCodeStep = createStep({
         contextPath: z.string(),
         repoAnalysis: RepoTestAnalysis,
         testSpecs: z.array(TestSpecification),
+        projectId: z.string(),
     }),
     outputSchema: z.object({
         containerId: z.string(),
         testGeneration: TestGenerationResult,
         repoAnalysis: RepoTestAnalysis,
         testSpecs: z.array(TestSpecification),
+        projectId: z.string(),
     }),
     execute: async ({ inputData, mastra, runId }) => {
         const { containerId, repoAnalysis, testSpecs } = inputData;
@@ -1275,6 +1321,7 @@ RETURN FORMAT (JSON only - MUST return accurate counts):
                 testGeneration,
                 repoAnalysis,
                 testSpecs: [testSpec],
+                projectId: inputData.projectId,
             };
         } catch (error) {
             logger?.error("❌ Step 2/3: Simple test generation failed", {
@@ -1327,6 +1374,7 @@ RETURN FORMAT (JSON only - MUST return accurate counts):
                 testGeneration,
                 repoAnalysis,
                 testSpecs: [testSpec],
+                projectId: inputData.projectId,
             };
         }
     },
@@ -1344,10 +1392,13 @@ export const finalizeStep = createStep({
         testGeneration: TestGenerationResult,
         repoAnalysis: RepoTestAnalysis,
         testSpecs: z.array(TestSpecification),
+        projectId: z.string(),
         retryCount: z.number().optional().default(0),
         lastError: z.string().optional(),
     }),
-    outputSchema: UnitTestResult,
+    outputSchema: UnitTestResult.extend({
+        projectId: z.string(),
+    }),
     execute: async ({ inputData, mastra, runId }) => {
         const { testGeneration, containerId, repoAnalysis, testSpecs, retryCount = 0, lastError } = inputData;
         const logger = mastra?.getLogger();
@@ -1384,7 +1435,7 @@ export const finalizeStep = createStep({
             });
 
             // Prepare retry with error feedback
-            return await retryTestGeneration(containerId, repoAnalysis, testSpecs, retryCount + 1, lastError, mastra, runId, logger);
+            return await retryTestGeneration(containerId, repoAnalysis, testSpecs, retryCount + 1, lastError, mastra, inputData.projectId, runId, logger);
         }
 
         // Phase 1: Syntax and Execution Validation
@@ -1470,7 +1521,7 @@ RETURN VALIDATION RESULTS (JSON only):
                         runId: runId,
                     });
 
-                    return await retryTestGeneration(containerId, repoAnalysis, testSpecs, retryCount + 1, validationResult.errorDetails, mastra, runId, logger);
+                    return await retryTestGeneration(containerId, repoAnalysis, testSpecs, retryCount + 1, validationResult.errorDetails, mastra, inputData.projectId, runId, logger);
                 }
 
                 // Update test generation quality based on validation
@@ -1558,6 +1609,7 @@ RETURN VALIDATION RESULTS (JSON only):
             toolCallCount: cliToolMetrics.callCount,
             testGeneration,
             recommendations,
+            projectId: inputData.projectId,
         };
 
         await notifyStepStatus({
@@ -1603,7 +1655,9 @@ export const generateUnitTestsWorkflow = createWorkflow({
     id: "generate-unit-tests-workflow",
     description: "MVP workflow: Generate unit tests for ONE high priority module using block-based approach with checkpoints",
     inputSchema: WorkflowInput,
-    outputSchema: UnitTestResult,
+    outputSchema: UnitTestResult.extend({
+        projectId: z.string(),
+    }),
 })
 .then(checkSavedPlanStep)
 .then(loadContextAndPlanStep)

@@ -14,6 +14,7 @@ const ALERTS_ONLY = (process.env.ALERTS_ONLY === 'true') || (process.env.LOG_MOD
 const WorkflowInput = z.object({
     containerId: z.string(),
     repoPath: z.string().optional(),
+    projectId: z.string().describe("Project ID associated with this workflow run"),
 });
 
 // Repository structure schema
@@ -138,6 +139,35 @@ const RepoContext = z.object({
 });
 
 // Helper to call the Context Agent with comprehensive analysis
+function normalizeAgentJsonForSchemas(input: any): any {
+    try {
+        const allowedComments = new Set(["extensive", "moderate", "minimal", "none"]);
+
+        const normalizeDoc = (doc: any) => {
+            if (!doc || typeof doc !== "object") return;
+            const hasReadmeVal = doc.hasReadme;
+            const hasApiDocsVal = doc.hasApiDocs;
+            doc.hasReadme = hasReadmeVal === null || hasReadmeVal === undefined ? false : Boolean(hasReadmeVal);
+            doc.hasApiDocs = hasApiDocsVal === null || hasApiDocsVal === undefined ? false : Boolean(hasApiDocsVal);
+
+            const commentsVal = typeof doc.codeComments === "string" ? doc.codeComments.trim().toLowerCase() : undefined;
+            doc.codeComments = commentsVal && allowedComments.has(commentsVal) ? commentsVal : "none";
+        };
+
+        // Direct CodebaseAnalysis shape
+        if (input && input.codeQuality && input.codeQuality.documentation) {
+            normalizeDoc(input.codeQuality.documentation);
+        }
+
+        // RepoContext shape with nested CodebaseAnalysis
+        if (input && input.codebase && input.codebase.codeQuality && input.codebase.codeQuality.documentation) {
+            normalizeDoc(input.codebase.codeQuality.documentation);
+        }
+    } catch {
+        // best-effort normalization; ignore errors
+    }
+    return input;
+}
 async function callContextAgentForAnalysis<T>(
     prompt: string, 
     schema: z.ZodType<T>, 
@@ -202,7 +232,8 @@ async function callContextAgentForAnalysis<T>(
     
     try {
         const parsed = JSON.parse(jsonText);
-        const validated = schema.parse(parsed);
+        const normalized = normalizeAgentJsonForSchemas(parsed);
+        const validated = schema.parse(normalized);
         
         logger?.debug("✅ JSON parsing and validation successful", {
             jsonLength: jsonText.length,
@@ -231,6 +262,7 @@ export const analyzeRepositoryStep = createStep({
     outputSchema: z.object({
         containerId: z.string(),
         repository: RepositoryStructure,
+        projectId: z.string(),
     }),
     execute: async ({ inputData, mastra, runId }) => {
         const { containerId } = inputData;
@@ -321,6 +353,7 @@ FAST ANALYSIS - Return JSON immediately:
             return {
                 containerId,
                 repository: result,
+                projectId: inputData.projectId,
             };
         } catch (error) {
             logger?.error("❌ Repository analysis failed", {
@@ -370,6 +403,7 @@ FAST ANALYSIS - Return JSON immediately:
                     },
                     languages: [],
                 },
+                projectId: inputData.projectId,
             };
         }
     },
@@ -382,6 +416,7 @@ export const analyzeCodebaseStep = createStep({
     outputSchema: z.object({
         containerId: z.string(),
         codebase: CodebaseAnalysis,
+        projectId: z.string(),
     }),
     execute: async ({ inputData, mastra, runId }) => {
         const { containerId } = inputData;
@@ -475,6 +510,7 @@ IMMEDIATE JSON RESPONSE:
             return {
                 containerId,
                 codebase: result,
+                projectId: inputData.projectId,
             };
         } catch (error) {
             logger?.error("❌ Codebase analysis failed", {
@@ -530,6 +566,7 @@ IMMEDIATE JSON RESPONSE:
                     },
                     frameworks: [],
                 },
+                projectId: inputData.projectId,
             };
         }
     },
@@ -542,6 +579,7 @@ export const analyzeBuildDeploymentStep = createStep({
     outputSchema: z.object({
         containerId: z.string(),
         buildDeploy: BuildAndDeployment,
+        projectId: z.string(),
     }),
     execute: async ({ inputData, mastra, runId }) => {
         const { containerId } = inputData;
@@ -639,6 +677,7 @@ INSTANT JSON:
             return {
                 containerId,
                 buildDeploy: result,
+                projectId: inputData.projectId,
             };
         } catch (error) {
             logger?.error("❌ Build and deployment analysis failed", {
@@ -698,6 +737,7 @@ INSTANT JSON:
                         },
                     },
                 },
+                projectId: inputData.projectId,
             };
         }
     },
@@ -710,18 +750,22 @@ export const synthesizeContextStep = createStep({
         "analyze-repository-step": z.object({
             containerId: z.string(),
             repository: RepositoryStructure,
+            projectId: z.string(),
         }),
         "analyze-codebase-step": z.object({
             containerId: z.string(),
             codebase: CodebaseAnalysis,
+            projectId: z.string(),
         }),
         "analyze-build-deployment-step": z.object({
             containerId: z.string(),
             buildDeploy: BuildAndDeployment,
+            projectId: z.string(),
         }),
     }),
     outputSchema: RepoContext.extend({
         containerId: z.string(),
+        projectId: z.string(),
     }),
     execute: async ({ inputData, mastra, runId }) => {
         // Extract results from parallel execution
@@ -844,7 +888,7 @@ Return strictly JSON matching this schema:
                 toolCallCount: cliToolMetrics.callCount,
             });
 
-            return { ...result, containerId };
+            return { ...result, containerId, projectId: inputData["analyze-repository-step"].projectId };
         } catch (error) {
             logger?.error("❌ Context synthesis failed", {
                 step: "4/6",
@@ -895,6 +939,7 @@ Return strictly JSON matching this schema:
                     overall: 0.2,
                 },
                 executiveSummary: "Analysis was incomplete due to technical issues during the codebase examination. The repository structure was partially analyzed, but a more thorough investigation would be needed to provide accurate insights and recommendations.",
+                projectId: inputData["analyze-repository-step"].projectId,
             };
         }
     },
@@ -905,11 +950,13 @@ export const saveContextStep = createStep({
     id: "save-context-step",
     inputSchema: RepoContext.extend({
         containerId: z.string(),
+        projectId: z.string(),
     }),
     outputSchema: z.object({
         containerId: z.string(),
         contextPath: z.string(),
         repoContext: RepoContext,
+        projectId: z.string(),
     }),
     execute: async ({ inputData, mastra, runId }) => {
         const logger = ALERTS_ONLY ? null : mastra?.getLogger();
@@ -1073,6 +1120,7 @@ export const saveContextStep = createStep({
                                 containerId,
                                 contextPath,
                                 repoContext: parsed,
+                                projectId: inputData.projectId,
                             });
                         });
                     });
@@ -1117,10 +1165,12 @@ export const saveContextStep = createStep({
                 containerId,
                 contextPath: "not-saved",
                 repoContext: parsed,
+                projectId: inputData.projectId,
             };
         }
     },
 });
+
 
 // Final validation and return step
 export const validateAndReturnStep = createStep({
@@ -1129,6 +1179,7 @@ export const validateAndReturnStep = createStep({
         containerId: z.string(),
         contextPath: z.string(),
         repoContext: RepoContext,
+        projectId: z.string(),
     }),
     outputSchema: z.object({
         result: z.string(),
@@ -1136,6 +1187,7 @@ export const validateAndReturnStep = createStep({
         toolCallCount: z.number(),
         contextPath: z.string(),
         repoContext: RepoContext,
+        projectId: z.string(),
     }),
     execute: async ({ inputData, mastra, runId }) => {
         const logger = ALERTS_ONLY ? null : mastra?.getLogger();
@@ -1213,6 +1265,7 @@ export const validateAndReturnStep = createStep({
                 toolCallCount: cliToolMetrics.callCount,
                 contextPath,
                 repoContext: parsed,
+                projectId: inputData.projectId,
             };
         } catch (error) {
             logger?.error("❌ Final validation failed", {
@@ -1305,6 +1358,7 @@ export const gatherContextWorkflow = createWorkflow({
         toolCallCount: z.number(),
         contextPath: z.string(),
         repoContext: RepoContext,
+        projectId: z.string(),
     }),
 })
 .then(workflowStartStep)

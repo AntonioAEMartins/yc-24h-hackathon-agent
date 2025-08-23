@@ -47,8 +47,8 @@ export function getProjectIdForRun(runId?: string): string | undefined {
 }
 
 function getAlertsApiUrl(): string {
-    // Prefer explicit env var; default to conventional Next.js API route
-    return process.env.ALERTS_API_URL || 'http://localhost:3000/api/alerts';
+    const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
+    return `${baseUrl}/api/alerts`;
 }
 
 export async function sendAlertEvent(payload: AlertEventPayload): Promise<void> {

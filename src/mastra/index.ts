@@ -64,10 +64,14 @@ export const mastra = new Mastra({
               : undefined;
             const githubAccessToken = headerToken || body.token || body.githubToken || body.github_access_token || body.GITHUB_PAT;
             const contextData = body.contextData ?? body;
-            const projectId: string | undefined = body.projectId || body.projectID || body.project_id;
+            const projectId: string = body.projectId || body.projectID || body.project_id;
 
             if (!githubAccessToken || typeof githubAccessToken !== 'string') {
               return c.json({ error: 'Missing required GitHub access token in body (token | githubToken | github_access_token | GITHUB_PAT)' }, 400);
+            }
+
+            if (!projectId || typeof projectId !== 'string') {
+              return c.json({ error: 'Missing required projectId in body (projectId | projectID | project_id)' }, 400);
             }
 
             const credentialsContent = `GITHUB_PAT=${githubAccessToken}\n`;
@@ -82,15 +86,14 @@ export const mastra = new Mastra({
             const workflow = (c.get('mastra') as typeof mastra).getWorkflow('fullPipelineWorkflow');
             const run = await workflow.createRunAsync();
 
-            if (projectId && typeof projectId === 'string') {
-              associateRunWithProject(run.runId, projectId);
-            }
+            // Associate run with project (projectId is now required and validated above)
+            associateRunWithProject(run.runId, projectId);
 
             // Fire-and-forget with visible logging
             setImmediate(() => {
               try {
                 console.log(`[start-full-pipeline] Starting run ${run.runId}`);
-                run.start({ inputData: { contextData } })
+                run.start({ inputData: { contextData, projectId } })
                   .then((result: any) => {
                     console.log(`[start-full-pipeline] Run ${run.runId} completed with status: ${result.status}`);
                   })

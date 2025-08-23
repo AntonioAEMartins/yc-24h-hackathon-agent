@@ -14,6 +14,8 @@ export const testDockerStep = createStep({
     id: "test-docker-step",
     inputSchema: z.object({
         contextData: z.any().optional().describe("Optional context data to pass through"),
+        repositoryUrl: z.string().optional().describe("Optional repository URL or owner/repo format (e.g., 'owner/repo' or 'https://github.com/owner/repo')"),
+        projectId: z.string().describe("Project ID associated with this workflow run"),
     }),
     outputSchema: z.object({
         result: z.string().describe("The result of the Docker operation"),
@@ -21,6 +23,8 @@ export const testDockerStep = createStep({
         toolCallCount: z.number().describe("Total number of tool calls made during execution"),
         containerId: z.string().describe("The ID of the created Docker container"),
         contextData: z.any().optional().describe("Context data passed through"),
+        repositoryUrl: z.string().optional().describe("Repository URL passed through"),
+        projectId: z.string().describe("Project ID passed through"),
     }),
     execute: async ({ inputData, runId }) => {
         await notifyStepStatus({
@@ -31,63 +35,73 @@ export const testDockerStep = createStep({
             subtitle: "Building image and starting container",
             metadata: { contextDataPresent: !!inputData.contextData }
         });
-        const agent = mastra?.getAgent("dockerAgent");
-        if (!agent) {
-            throw new Error("Docker agent not found");
+
+        const logger = ALERTS_ONLY ? null : mastra?.getLogger();
+
+        function sh(cmd: string): Promise<string> {
+            return new Promise((resolve, reject) => {
+                exec(cmd, (error, stdout, stderr) => {
+                    if (error) {
+                        reject(new Error(stderr || error.message));
+                    } else {
+                        resolve(stdout);
+                    }
+                });
+            });
         }
 
-        const command = `You must use the exec_command tool to run shell commands. Do not simulate results.
-
-Task:
-1) Build a Docker image named yc-ubuntu:22.04 from ubuntu:22.04 with:
-   - Install git
-   - WORKDIR /app
-2) Create and start a container named yc-ubuntu-test in detached interactive mode that keeps running.
-3) Output ONLY the container ID as the final answer (single line, no extra text).
-
-Run these exact commands in order:
-
-docker build -t yc-ubuntu:22.04 -<<'EOF'
+        try {
+            // Build minimal image
+            const buildCmd = `docker build -t yc-ubuntu:22.04 -<<'EOF'
 FROM ubuntu:22.04
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 CMD ["bash"]
-EOF
+EOF`;
+            logger?.info("🐳 Building Docker image yc-ubuntu:22.04", { type: "DOCKER", runId });
+            await sh(buildCmd);
 
-# Remove any existing container with the same name to avoid conflicts
-docker rm -f yc-ubuntu-test || true
+            // Remove any existing container to avoid conflicts
+            await sh("docker rm -f yc-ubuntu-test || true");
 
-# Run the container (no TTY needed)
-docker run -d --name yc-ubuntu-test yc-ubuntu:22.04 tail -f /dev/null
+            // Run container detached
+            logger?.info("🚀 Starting container yc-ubuntu-test", { type: "DOCKER", runId });
+            await sh("docker run -d --name yc-ubuntu-test yc-ubuntu:22.04 tail -f /dev/null");
 
-docker inspect -f '{{.Id}}' yc-ubuntu-test`;
+            // Get container ID
+            const inspectOut = await sh("docker inspect -f '{{.Id}}' yc-ubuntu-test");
+            const containerId = (inspectOut || "").trim();
 
-        const result: any = await agent.generate(command,
-            {
-                maxSteps: 100,
-                maxRetries: 5,
-            }
-        );
+            await notifyStepStatus({
+                stepId: "test-docker-step",
+                status: "completed",
+                runId,
+                containerId,
+                title: "Docker setup completed",
+                subtitle: `Container ready (${containerId.substring(0,12)})`,
+                toolCallCount: cliToolMetrics.callCount,
+            });
 
-        const containerId = (result?.text || "").trim();
-
-        await notifyStepStatus({
-            stepId: "test-docker-step",
-            status: "completed",
-            runId,
-            containerId,
-            title: "Docker setup completed",
-            subtitle: `Container ready (${containerId.substring(0,12)})`,
-            toolCallCount: cliToolMetrics.callCount,
-        });
-
-        return {
-            result: result?.text || "Operation completed",
-            success: true,
-            toolCallCount: cliToolMetrics.callCount,
-            containerId,
-            contextData: inputData.contextData,
-        };
+            return {
+                result: inspectOut || "Operation completed",
+                success: true,
+                toolCallCount: cliToolMetrics.callCount,
+                containerId,
+                contextData: inputData.contextData,
+                repositoryUrl: inputData.repositoryUrl,
+                projectId: inputData.projectId,
+            };
+        } catch (error) {
+            await notifyStepStatus({
+                stepId: "test-docker-step",
+                status: "failed",
+                runId,
+                title: "Docker setup failed",
+                subtitle: error instanceof Error ? error.message : 'Unknown error',
+                level: 'error',
+            });
+            throw error;
+        }
     }
 });
 
@@ -99,6 +113,8 @@ export const testDockerGithubCloneStep = createStep({
         toolCallCount: z.number().describe("Total number of tool calls made during execution"),
         containerId: z.string().describe("The ID of the created Docker container"),
         contextData: z.any().optional().describe("Context data passed through"),
+        repositoryUrl: z.string().optional().describe("Repository URL passed through"),
+        projectId: z.string().describe("Project ID passed through"),
     }),
     outputSchema: z.object({
         result: z.string().describe("The result of the Docker operation"),
@@ -106,6 +122,8 @@ export const testDockerGithubCloneStep = createStep({
         toolCallCount: z.number().describe("Total number of tool calls made during execution"),
         containerId: z.string().describe("The ID of the created Docker container"),
         contextData: z.any().optional().describe("Context data passed through"),
+        repositoryUrl: z.string().optional().describe("Repository URL passed through"),
+        projectId: z.string().describe("Project ID passed through"),
         repoPath: z.string().describe("Absolute path to the cloned repository inside the container"),
     }),
     execute: async ({ inputData, runId }) => {
@@ -130,17 +148,54 @@ export const testDockerGithubCloneStep = createStep({
                 return;
             }
 
-            // Determine repository coordinates from contextData
-            const context: any = (inputData as any)?.contextData || {};
-            let repoOwner: string | undefined = typeof context.owner === 'string' ? context.owner : undefined;
-            let repoName: string | undefined = typeof context.repo === 'string' ? context.repo : undefined;
-            const fullName: string | undefined = typeof context.fullName === 'string' ? context.fullName : (typeof context.full_name === 'string' ? context.full_name : undefined);
-            if ((!repoOwner || !repoName) && fullName && fullName.includes('/')) {
-                const [ownerPart, repoPart] = fullName.split('/');
-                repoOwner = repoOwner || ownerPart;
-                repoName = repoName || repoPart;
+            // Determine repository coordinates - prioritize manual input, then contextData, then default
+            let resolvedRepoPath: string;
+            let repoOwner: string | undefined;
+            let repoName: string | undefined;
+            
+            // First, check for manually provided repository URL
+            if (inputData.repositoryUrl) {
+                const repoUrl = inputData.repositoryUrl.trim();
+                
+                // Handle different formats: "owner/repo", "https://github.com/owner/repo", "https://github.com/owner/repo.git"
+                if (repoUrl.includes('github.com/')) {
+                    // Extract from full GitHub URL
+                    const match = repoUrl.match(/github\.com\/([^\/]+)\/([^\/\.]+)/);
+                    if (match) {
+                        repoOwner = match[1];
+                        repoName = match[2];
+                        resolvedRepoPath = `${repoOwner}/${repoName}`;
+                    } else {
+                        throw new Error(`Invalid GitHub URL format: ${repoUrl}`);
+                    }
+                } else if (repoUrl.includes('/') && !repoUrl.includes(' ')) {
+                    // Handle "owner/repo" format
+                    const [ownerPart, repoPart] = repoUrl.split('/');
+                    if (ownerPart && repoPart) {
+                        repoOwner = ownerPart;
+                        repoName = repoPart;
+                        resolvedRepoPath = repoUrl;
+                    } else {
+                        throw new Error(`Invalid repository format: ${repoUrl}. Expected format: "owner/repo"`);
+                    }
+                } else {
+                    throw new Error(`Invalid repository format: ${repoUrl}. Expected format: "owner/repo" or GitHub URL`);
+                }
+            } else {
+                // Fall back to contextData extraction
+                const context: any = (inputData as any)?.contextData || {};
+                repoOwner = typeof context.owner === 'string' ? context.owner : undefined;
+                repoName = typeof context.repo === 'string' ? context.repo : undefined;
+                const fullName: string | undefined = typeof context.fullName === 'string' ? context.fullName : (typeof context.full_name === 'string' ? context.full_name : undefined);
+                if ((!repoOwner || !repoName) && fullName && fullName.includes('/')) {
+                    const [ownerPart, repoPart] = fullName.split('/');
+                    repoOwner = repoOwner || ownerPart;
+                    repoName = repoName || repoPart;
+                }
+                resolvedRepoPath = (repoOwner && repoName) ? `${repoOwner}/${repoName}` : 'AntonioAEMartins/yc-24h-hackathon-agent';
             }
-            const resolvedRepoPath = (repoOwner && repoName) ? `${repoOwner}/${repoName}` : 'AntonioAEMartins/yc-24h-hackathon-agent';
+            // Get default branch from contextData
+            const context: any = (inputData as any)?.contextData || {};
             const defaultBranch: string | undefined = typeof context.defaultBranch === 'string' ? context.defaultBranch : (typeof context.default_branch === 'string' ? context.default_branch : undefined);
             const branchArg = defaultBranch ? ` --branch ${defaultBranch} ` : ' ';
 
@@ -190,6 +245,8 @@ export const testDockerGithubCloneStep = createStep({
                                 toolCallCount: cliToolMetrics.callCount,
                                 containerId: inputData.containerId,
                                 contextData: inputData.contextData,
+                                repositoryUrl: inputData.repositoryUrl,
+                                projectId: inputData.projectId,
                                 repoPath: inferredRepoPath,
                             });
                         }
@@ -200,15 +257,359 @@ export const testDockerGithubCloneStep = createStep({
     }
 });
 
-export const saveContextStep = createStep({
-    id: "save-context-step",
+// Step: Post project description to backend
+export const postProjectDescriptionStep = createStep({
+    id: "post-project-description-step",
     inputSchema: z.object({
         result: z.string().describe("The result of the Docker operation"),
         success: z.boolean().describe("Whether the operation was successful"),
         toolCallCount: z.number().describe("Total number of tool calls made during execution"),
         containerId: z.string().describe("The ID of the created Docker container"),
-        contextData: z.any().optional().describe("Context data to save to the container"),
+        contextData: z.any().optional().describe("Context data passed through"),
+        repositoryUrl: z.string().optional().describe("Repository URL passed through"),
+        projectId: z.string().describe("Project ID passed through"),
         repoPath: z.string().describe("Absolute path to the cloned repository inside the container"),
+    }),
+    outputSchema: z.object({
+        result: z.string().describe("The result of the Docker operation"),
+        success: z.boolean().describe("Whether the operation was successful"),
+        toolCallCount: z.number().describe("Total number of tool calls made during execution"),
+        containerId: z.string().describe("The ID of the created Docker container"),
+        contextData: z.any().optional().describe("Context data passed through"),
+        repositoryUrl: z.string().optional().describe("Repository URL passed through"),
+        projectId: z.string().describe("Project ID passed through"),
+        repoPath: z.string().describe("Absolute path to the cloned repository inside the container"),
+    }),
+    execute: async ({ inputData, mastra, runId }) => {
+        const logger = ALERTS_ONLY ? null : mastra?.getLogger();
+        await notifyStepStatus({
+            stepId: "post-project-description-step",
+            status: "starting",
+            runId,
+            containerId: inputData.containerId,
+            title: "Post project description",
+            subtitle: "Posting description to backend",
+        });
+
+        // Extract projectId from inputData (now passed directly)
+        const context: any = inputData.contextData || {};
+        const projectId = inputData.projectId;
+
+        const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
+        const descriptionUrl = `${baseUrl}/api/projects/${projectId}/description`;
+
+        // Generate basic description from repo info
+        const repoName = context.repo || context.name || 'repository';
+        const description = `Repository: ${repoName}. This project is being analyzed by the Mastra AI workflow system.`;
+
+        const payload = { description };
+
+        logger?.info("📨 Preparing to post project description", {
+            step: "post-project-description",
+            url: descriptionUrl,
+            projectId,
+            hasContextData: !!inputData.contextData,
+            contextKeys: Object.keys(context || {}),
+            descriptionPreview: description.substring(0, 120),
+            type: "BACKEND_POST",
+            runId,
+        });
+
+        try {
+            logger?.debug("🔗 HTTP request details", {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                url: descriptionUrl,
+                payload,
+                type: "HTTP_REQUEST",
+                runId,
+            });
+            const res = await fetch(descriptionUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+
+            const success = res.ok;
+            logger?.info("📥 Backend responded for project description", {
+                status: res.status,
+                ok: res.ok,
+                url: descriptionUrl,
+                projectId,
+                type: "BACKEND_RESPONSE",
+                runId,
+            });
+            if (!success) {
+                const text = await res.text().catch(() => '');
+                logger?.warn("⚠️  Backend responded non-2xx for description", { 
+                    url: descriptionUrl, 
+                    status: res.status, 
+                    payload,
+                    responseText: text.substring(0, 500), 
+                    type: "BACKEND_POST", 
+                    runId 
+                });
+            }
+
+            await notifyStepStatus({
+                stepId: "post-project-description-step",
+                status: success ? "completed" : "failed",
+                runId,
+                containerId: inputData.containerId,
+                title: success ? "Description posted" : "Description post failed",
+                subtitle: success ? `Posted to project ${projectId}` : "Failed to post description",
+            });
+
+        } catch (err) {
+            logger?.warn("⚠️  Failed to POST description", { 
+                url: descriptionUrl,
+                error: err instanceof Error ? err.message : String(err),
+                stack: err instanceof Error ? err.stack : undefined,
+                type: "BACKEND_POST",
+                runId 
+            });
+
+            await notifyStepStatus({
+                stepId: "post-project-description-step",
+                status: "failed",
+                runId,
+                containerId: inputData.containerId,
+                title: "Description post failed",
+                subtitle: "Network error",
+            });
+        }
+
+        return {
+            ...inputData,
+            repositoryUrl: inputData.repositoryUrl,
+            projectId: inputData.projectId,
+        };
+    },
+});
+
+// Step: Post project tech stack to backend
+export const postProjectStackStep = createStep({
+    id: "post-project-stack-step",
+    inputSchema: z.object({
+        result: z.string().describe("The result of the Docker operation"),
+        success: z.boolean().describe("Whether the operation was successful"),
+        toolCallCount: z.number().describe("Total number of tool calls made during execution"),
+        containerId: z.string().describe("The ID of the created Docker container"),
+        contextData: z.any().optional().describe("Context data passed through"),
+        repositoryUrl: z.string().optional().describe("Repository URL passed through"),
+        projectId: z.string().describe("Project ID passed through"),
+        repoPath: z.string().describe("Absolute path to the cloned repository inside the container"),
+    }),
+    outputSchema: z.object({
+        result: z.string().describe("The result of the Docker operation"),
+        success: z.boolean().describe("Whether the operation was successful"),
+        toolCallCount: z.number().describe("Total number of tool calls made during execution"),
+        containerId: z.string().describe("The ID of the created Docker container"),
+        contextData: z.any().optional().describe("Context data passed through"),
+        repositoryUrl: z.string().optional().describe("Repository URL passed through"),
+        projectId: z.string().describe("Project ID passed through"),
+        repoPath: z.string().describe("Absolute path to the cloned repository inside the container"),
+    }),
+    execute: async ({ inputData, mastra, runId }) => {
+        const logger = ALERTS_ONLY ? null : mastra?.getLogger();
+        await notifyStepStatus({
+            stepId: "post-project-stack-step",
+            status: "starting",
+            runId,
+            containerId: inputData.containerId,
+            title: "Post project stack",
+            subtitle: "Posting tech stack to backend",
+        });
+
+        // Extract projectId from inputData (now passed directly)
+        const context: any = inputData.contextData || {};
+        const projectId = inputData.projectId;
+
+        const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
+        const stackUrl = `${baseUrl}/api/projects/${projectId}/stack`;
+
+        // Basic tech stack detection from repo files (simple heuristics)
+        function normalizeName(name: string): string {
+            return name.toLowerCase().replace(/@/g, '').replace(/[^a-z0-9+\-.]/g, '');
+        }
+
+        const stackMap: Record<string, { icon: string; title: string; description: string }> = {
+            "next": { icon: "nextjs", title: "Next.js", description: "React framework for hybrid rendering (SSR/SSG) and routing by Vercel." },
+            "nextjs": { icon: "nextjs", title: "Next.js", description: "React framework for hybrid rendering (SSR/SSG) and routing by Vercel." },
+            "react": { icon: "react", title: "React", description: "Component-based UI library for building interactive web interfaces." },
+            "typescript": { icon: "ts", title: "TypeScript", description: "Typed superset of JavaScript that compiles to plain JS." },
+            "javascript": { icon: "js", title: "JavaScript", description: "High-level, dynamic language for the web and Node.js." },
+            "node": { icon: "nodejs", title: "Node.js", description: "V8-based JavaScript runtime for server-side applications." },
+            "nodejs": { icon: "nodejs", title: "Node.js", description: "V8-based JavaScript runtime for server-side applications." },
+            "tailwind": { icon: "tailwind", title: "Tailwind CSS", description: "Utility-first CSS framework for rapid UI development." },
+            "vite": { icon: "vite", title: "Vite", description: "Next-gen frontend tooling with lightning-fast dev server and build." },
+            "vitest": { icon: "vitest", title: "Vitest", description: "Vite-native unit test framework with Jest-compatible API." },
+            "jest": { icon: "jest", title: "Jest", description: "Delightful JavaScript testing framework by Facebook." },
+            "prisma": { icon: "prisma", title: "Prisma", description: "Type-safe ORM for Node.js and TypeScript." },
+            "docker": { icon: "docker", title: "Docker", description: "Containerization platform for building and running applications." },
+        };
+
+        function mapToStackItem(name: string): { title: string; description: string; icon: string } | null {
+            const n = normalizeName(name);
+            const direct = stackMap[n];
+            if (direct) return { title: direct.title, description: direct.description, icon: direct.icon };
+            if (/^next(\.|$)/.test(n)) return { title: "Next.js", description: stackMap["next"].description, icon: "nextjs" };
+            if (/^react(\.|$)/.test(n)) return { title: "React", description: stackMap["react"].description, icon: "react" };
+            if (n.includes("typescript") || n === "ts") return { title: "TypeScript", description: stackMap["typescript"].description, icon: "ts" };
+            if (n.includes("node")) return { title: "Node.js", description: stackMap["node"].description, icon: "nodejs" };
+            return null;
+        }
+
+        // Basic detection from repo name and context
+        const candidateNames: string[] = ['javascript', 'node'];
+        const repoName = (context.repo || context.name || '').toLowerCase();
+        if (repoName.includes('next')) candidateNames.push('nextjs');
+        if (repoName.includes('react')) candidateNames.push('react');
+        if (repoName.includes('typescript') || repoName.includes('-ts-')) candidateNames.push('typescript');
+
+        const seen = new Set<string>();
+        const techStack = candidateNames
+            .map(mapToStackItem)
+            .filter((v): v is { title: string; description: string; icon: string } => !!v)
+            .filter(item => {
+                const key = item.title.toLowerCase();
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+            });
+
+        logger?.info("📨 Preparing to post project stack", {
+            step: "post-project-stack",
+            url: stackUrl,
+            projectId,
+            candidateCount: candidateNames.length,
+            techStackCount: techStack.length,
+            techStackSample: techStack.slice(0, 5),
+            type: "BACKEND_POST",
+            runId,
+        });
+
+        try {
+            let successCount = 0;
+            let lastError: string | undefined;
+
+            // Send each tech stack item individually as the backend expects single items
+            for (const item of techStack) {
+                const payload = {
+                    title: item.title,
+                    description: item.description,
+                    icon: item.icon || null, // Backend expects string | null
+                };
+
+                logger?.debug("🔗 HTTP request details", {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    url: stackUrl,
+                    payload,
+                    type: "HTTP_REQUEST",
+                    runId,
+                });
+
+                const res = await fetch(stackUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+
+                if (res.ok) {
+                    successCount++;
+                    logger?.debug("✅ Stack item posted successfully", {
+                        item: item.title,
+                        status: res.status,
+                        projectId,
+                        type: "BACKEND_RESPONSE",
+                        runId,
+                    });
+                } else {
+                    const text = await res.text().catch(() => '');
+                    lastError = `${item.title}: ${res.status} ${text}`;
+                    logger?.warn("⚠️  Backend responded non-2xx for stack item", { 
+                        item: item.title,
+                        url: stackUrl, 
+                        status: res.status, 
+                        text: text.substring(0, 500), 
+                        type: "BACKEND_POST", 
+                        runId 
+                    });
+                }
+            }
+
+            const success = successCount > 0;
+            logger?.info("📥 Backend stack posting completed", {
+                successCount,
+                totalItems: techStack.length,
+                success,
+                lastError,
+                url: stackUrl,
+                projectId,
+                type: "BACKEND_RESPONSE",
+                runId,
+            });
+
+            await notifyStepStatus({
+                stepId: "post-project-stack-step",
+                status: success ? "completed" : "failed",
+                runId,
+                containerId: inputData.containerId,
+                title: success ? "Stack posted" : "Stack post failed",
+                subtitle: success ? `Posted ${successCount}/${techStack.length} technologies` : `Failed to post stack${lastError ? `: ${lastError}` : ''}`,
+            });
+
+        } catch (err) {
+            logger?.warn("⚠️  Failed to POST stack items", { 
+                url: stackUrl,
+                error: err instanceof Error ? err.message : String(err),
+                stack: err instanceof Error ? err.stack : undefined,
+                type: "BACKEND_POST",
+                runId 
+            });
+
+            await notifyStepStatus({
+                stepId: "post-project-stack-step",
+                status: "failed",
+                runId,
+                containerId: inputData.containerId,
+                title: "Stack post failed",
+                subtitle: "Network error during stack posting",
+            });
+        }
+
+        return {
+            ...inputData,
+            repositoryUrl: inputData.repositoryUrl,
+            projectId: inputData.projectId,
+        };
+    },
+});
+
+export const saveContextStep = createStep({
+    id: "save-context-step",
+    inputSchema: z.object({
+        "post-project-description-step": z.object({
+            result: z.string(),
+            success: z.boolean(),
+            toolCallCount: z.number(),
+            containerId: z.string(),
+            contextData: z.any().optional(),
+            repositoryUrl: z.string().optional(),
+            projectId: z.string(),
+            repoPath: z.string(),
+        }),
+        "post-project-stack-step": z.object({
+            result: z.string(),
+            success: z.boolean(),
+            toolCallCount: z.number(),
+            containerId: z.string(),
+            contextData: z.any().optional(),
+            repositoryUrl: z.string().optional(),
+            projectId: z.string(),
+            repoPath: z.string(),
+        }),
     }),
     outputSchema: z.object({
         result: z.string().describe("The result of the Docker operation"),
@@ -219,8 +620,10 @@ export const saveContextStep = createStep({
         repoPath: z.string().describe("Absolute path to the cloned repository inside the container"),
     }),
     execute: async ({ inputData, mastra, runId }) => {
-        const { containerId, contextData } = inputData;
-        const repoPath = (inputData as any)?.repoPath || '';
+        const desc = (inputData as any)["post-project-description-step"];
+        const containerId = desc.containerId;
+        const contextData = desc.contextData;
+        const repoPath = desc.repoPath || '';
         const logger = ALERTS_ONLY ? null : mastra?.getLogger();
         const contextPath = "/app/agent.context.json";
         await notifyStepStatus({
@@ -406,9 +809,11 @@ export const saveContextStep = createStep({
 
 export const testDockerWorkflow = createWorkflow({
     id: "test-docker-workflow",
-    description: "Build Docker container, clone repository, and save context data efficiently using code-based operations",
+    description: "Build Docker container, clone repository, post project info in parallel, and save context data efficiently using code-based operations",
     inputSchema: z.object({
         contextData: z.any().optional().describe("Optional context data to save to the container"),
+        repositoryUrl: z.string().optional().describe("Optional repository URL or owner/repo format (e.g., 'owner/repo' or 'https://github.com/owner/repo')"),
+        projectId: z.string().describe("Project ID associated with this workflow run"),
     }),
     outputSchema: z.object({
         result: z.string().describe("The result of the Docker operation"),
@@ -418,4 +823,4 @@ export const testDockerWorkflow = createWorkflow({
         contextPath: z.string().describe("Path where context was saved in the container"),
         repoPath: z.string().describe("Absolute path to the cloned repository inside the container"),
     }),
-}).then(testDockerStep).then(testDockerGithubCloneStep).then(saveContextStep).commit();
+}).then(testDockerStep).then(testDockerGithubCloneStep).parallel([postProjectDescriptionStep, postProjectStackStep]).then(saveContextStep).commit();

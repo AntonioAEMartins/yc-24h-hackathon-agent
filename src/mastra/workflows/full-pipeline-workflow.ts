@@ -1,6 +1,6 @@
 import { createWorkflow } from "@mastra/core";
 import z from "zod";
-import { testDockerStep, testDockerGithubCloneStep, saveContextStep as dockerSaveContextStep } from "./test/01-docker-test-workflow";
+import { testDockerStep, testDockerGithubCloneStep, postProjectDescriptionStep, postProjectStackStep, saveContextStep as dockerSaveContextStep } from "./test/01-docker-test-workflow";
 import { workflowStartStep as gatherStartStep, analyzeRepositoryStep, analyzeCodebaseStep, analyzeBuildDeploymentStep, synthesizeContextStep, saveContextStep as gatherSaveContextStep, validateAndReturnStep as gatherValidateAndReturnStep } from "./test/02-gather-context-workflow";
 import { checkSavedPlanStep, loadContextAndPlanStep, generateTestCodeStep, finalizeStep } from "./test/03-generate-unit-tests-workflow";
  
@@ -8,6 +8,8 @@ import { checkSavedPlanStep, loadContextAndPlanStep, generateTestCodeStep, final
 // Input for the pipeline (optional context to seed into the container)
 const PipelineInput = z.object({
     contextData: z.any().optional().describe("Optional context data to save to the container during docker setup"),
+    repositoryUrl: z.string().optional().describe("Optional repository URL or owner/repo format (e.g., 'owner/repo' or 'https://github.com/owner/repo')"),
+    projectId: z.string().describe("Project ID associated with this workflow run"),
 });
 
 // Minimal aggregated output schema to report end-to-end results
@@ -17,6 +19,7 @@ const PipelineOutput = z.object({
     toolCallCount: z.number(),
     containerId: z.string(),
     contextPath: z.string(),
+    projectId: z.string(),
 });
 
 export const fullPipelineWorkflow = createWorkflow({
@@ -27,6 +30,7 @@ export const fullPipelineWorkflow = createWorkflow({
 })
 .then(testDockerStep)
 .then(testDockerGithubCloneStep)
+.parallel([postProjectDescriptionStep as any, postProjectStackStep as any])
 .then(dockerSaveContextStep)
 .then(gatherStartStep as any)
 .parallel([analyzeRepositoryStep as any, analyzeCodebaseStep as any, analyzeBuildDeploymentStep as any])
