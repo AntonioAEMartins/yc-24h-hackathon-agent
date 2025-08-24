@@ -142,6 +142,8 @@ const RepoContext = z.object({
 function normalizeAgentJsonForSchemas(input: any): any {
     try {
         const allowedComments = new Set(["extensive", "moderate", "minimal", "none"]);
+        const allowedRepoTypes = new Set(["monorepo", "single-package", "multi-project"]);
+        const allowedPackageTypes = new Set(["app", "library", "tool", "config", "unknown"]);
 
         const normalizeDoc = (doc: any) => {
             if (!doc || typeof doc !== "object") return;
@@ -154,6 +156,43 @@ function normalizeAgentJsonForSchemas(input: any): any {
             doc.codeComments = commentsVal && allowedComments.has(commentsVal) ? commentsVal : "none";
         };
 
+        const normalizeRepoType = (value: any): string => {
+            if (typeof value !== "string") return "single-package";
+            const v = value.trim().toLowerCase().replace(/\s+/g, "-");
+            if (allowedRepoTypes.has(v)) return v;
+            if (v.includes("mono")) return "monorepo";
+            if (v.includes("multi")) return "multi-project";
+            return "single-package";
+        };
+
+        const normalizePackageType = (value: any): "app" | "library" | "tool" | "config" | "unknown" => {
+            if (typeof value !== "string") return "unknown";
+            const v = value.trim().toLowerCase();
+            if (allowedPackageTypes.has(v)) return v as any;
+            if (v.includes("lib")) return "library";
+            if (v.includes("app")) return "app";
+            if (v.includes("tool")) return "tool";
+            if (v.includes("config") || v.includes("cfg")) return "config";
+            return "unknown";
+        };
+
+        const normalizeRepositoryShape = (repo: any) => {
+            if (!repo || typeof repo !== "object") return;
+            if (repo.type !== undefined) {
+                repo.type = normalizeRepoType(repo.type);
+            }
+            if (repo.structure && Array.isArray(repo.structure.packages)) {
+                repo.structure.packages = repo.structure.packages.map((pkg: any) => {
+                    const normalized: any = { ...pkg };
+                    normalized.path = typeof pkg.path === "string" ? pkg.path : String(pkg.path || ".");
+                    normalized.name = typeof pkg.name === "string" ? pkg.name : (pkg.name == null ? null : String(pkg.name));
+                    normalized.type = normalizePackageType(pkg.type);
+                    normalized.language = typeof pkg.language === "string" ? pkg.language : (pkg.language == null ? null : String(pkg.language));
+                    return normalized;
+                });
+            }
+        };
+
         // Direct CodebaseAnalysis shape
         if (input && input.codeQuality && input.codeQuality.documentation) {
             normalizeDoc(input.codeQuality.documentation);
@@ -162,6 +201,16 @@ function normalizeAgentJsonForSchemas(input: any): any {
         // RepoContext shape with nested CodebaseAnalysis
         if (input && input.codebase && input.codebase.codeQuality && input.codebase.codeQuality.documentation) {
             normalizeDoc(input.codebase.codeQuality.documentation);
+        }
+
+        // Direct RepositoryStructure shape
+        if (input && input.gitStatus && input.structure) {
+            normalizeRepositoryShape(input);
+        }
+
+        // RepoContext shape with nested RepositoryStructure
+        if (input && input.repository) {
+            normalizeRepositoryShape(input.repository);
         }
     } catch {
         // best-effort normalization; ignore errors
@@ -351,6 +400,11 @@ MANDATORY WORKFLOW (Execute in exact order):
 4. Quick scan: docker_exec REPO_DIR=$( if [ -n '${repoPath}' ] && [ -d '${repoPath}/.git' ]; then echo '${repoPath}'; else for d in /app/*; do if [ -d "$d/.git" ]; then echo "$d"; break; fi; done; fi ); cd "\${REPO_DIR:-/app}"; ls -la
 5. Source check: docker_exec REPO_DIR=$( if [ -n '${repoPath}' ] && [ -d '${repoPath}/.git' ]; then echo '${repoPath}'; else for d in /app/*; do if [ -d "$d/.git" ]; then echo "$d"; break; fi; done; fi ); cd "\${REPO_DIR:-/app}"; if [ -d src ]; then find src -name "*.ts" -o -name "*.js" | head -10; else echo "NO_SRC"; fi
 6. Package type: docker_exec REPO_DIR=$( if [ -n '${repoPath}' ] && [ -d '${repoPath}/.git' ]; then echo '${repoPath}'; else for d in /app/*; do if [ -d "$d/.git" ]; then echo "$d"; break; fi; done; fi ); cd "\${REPO_DIR:-/app}"; if [ -f package.json ]; then echo "SINGLE_PACKAGE"; else echo "OTHER"; fi
+
+STRICT JSON ENUM RULES:
+- Field repository.type must be one of: "monorepo" | "single-package" | "multi-project". If unsure, choose the closest; never output any other value.
+- Field structure.packages[].type must be one of: "app" | "library" | "tool" | "config" | "unknown". If unsure, use "unknown".
+- Do not use values like "other", "directory", "single" or uppercase variants. Use lowercase with hyphens exactly as shown.
 
 FAST ANALYSIS - Return JSON immediately:
 {
@@ -1025,8 +1079,8 @@ Return strictly JSON matching this schema:
 });
 
 // Step 5: Save Context for Unit Testing
-export const saveContextStep = createStep({
-    id: "save-context-step",
+export const gatherSaveContextStep = createStep({
+    id: "gather-save-context-step",
     inputSchema: RepoContext.extend({
         containerId: z.string(),
         projectId: z.string(),
@@ -1443,7 +1497,7 @@ export const gatherContextWorkflow = createWorkflow({
 .then(workflowStartStep)
 .parallel([analyzeRepositoryStep, analyzeCodebaseStep, analyzeBuildDeploymentStep])
 .then(synthesizeContextStep)
-.then(saveContextStep)
+.then(gatherSaveContextStep)
 .then(validateAndReturnStep)
 .commit();
 

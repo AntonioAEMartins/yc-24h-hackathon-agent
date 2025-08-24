@@ -12,12 +12,16 @@ import { testSpecificationAgent } from './agents/test-specification-agent';
 import { testGenerationAgent } from './agents/test-generation-agent';
 import { testValidationAgent } from './agents/test-validation-agent';
 import { githubPrAgent } from './agents/github-pr-agent';
+import { codebaseDescriptionAgent } from './agents/codebase-description-agent';
+import { testCoveringAgent } from './agents/test-covering-agent';
+import { typescriptVitestCoverageAgent } from './agents/typescript-vitest-coverage-agent';
 // import { testManagerAgent } from './agents/test-manager-agent'; // COMMENTED OUT FOR MVP VALIDATION
 // import { testCoderAgent } from './agents/test-coder-agent'; // COMMENTED OUT FOR MVP VALIDATION
 import { testDockerWorkflow } from './workflows/test/01-docker-test-workflow';
 import { gatherContextWorkflow } from './workflows/test/02-gather-context-workflow';
 import { generateUnitTestsWorkflow } from './workflows/test/03-generate-unit-tests-workflow';
 import { githubPrWorkflow } from './workflows/test/04-github-pr-workflow';
+import { testCoverageWorkflow } from './workflows/test/05-test-coverage-workflow';
 // import { unitTestWorkflow } from './workflows/unit-test-workflow';
 import { fullPipelineWorkflow } from './workflows/full-pipeline-workflow';
 import { writeFileSync } from 'fs';
@@ -37,7 +41,7 @@ const getLogLevel = (): LogLevel => {
 };
 
 export const mastra = new Mastra({
-  workflows: { testDockerWorkflow, gatherContextWorkflow, generateUnitTestsWorkflow, githubPrWorkflow, fullPipelineWorkflow },
+  workflows: { testDockerWorkflow, gatherContextWorkflow, generateUnitTestsWorkflow, githubPrWorkflow, testCoverageWorkflow, fullPipelineWorkflow },
   agents: { 
     dockerAgent, 
     contextAgent, 
@@ -47,6 +51,9 @@ export const mastra = new Mastra({
     testGenerationAgent,
     testValidationAgent,
     githubPrAgent,
+    codebaseDescriptionAgent,
+    testCoveringAgent,
+    typescriptVitestCoverageAgent,
     // testManagerAgent, // COMMENTED OUT FOR MVP VALIDATION
     // testCoderAgent    // COMMENTED OUT FOR MVP VALIDATION
   },

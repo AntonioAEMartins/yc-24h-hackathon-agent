@@ -3,7 +3,7 @@ import { mastra } from "../..";
 import z from "zod";
 import { cliToolMetrics } from "../../tools/cli-tool";
 import { exec } from "child_process";
-import { existsSync, writeFileSync, unlinkSync, mkdtempSync } from "fs";
+import { existsSync, writeFileSync, unlinkSync, mkdtempSync, readFileSync } from "fs";
 import path from "path";
 import os from "os";
 import { notifyStepStatus } from "../../tools/alert-notifier";
@@ -298,11 +298,222 @@ export const postProjectDescriptionStep = createStep({
         const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
         const descriptionUrl = `${baseUrl}/api/projects/${projectId}/description`;
 
-        // Generate basic description from repo info
-        const repoName = context.repo || context.name || 'repository';
-        const description = `Repository: ${repoName}. This project is being analyzed by the Mastra AI workflow system.`;
+        // Build project description using a dedicated agent first; fall back to static heuristics
+        const containerId = inputData.containerId;
+        const repoPath = (inputData as any).repoPath || "/app";
 
-        const payload = { description };
+        const sh = (cmd: string): Promise<string> => {
+            return new Promise((resolve, reject) => {
+                exec(`docker exec ${containerId} bash -lc ${JSON.stringify(cmd)}`, (error, stdout, stderr) => {
+                    if (error) reject(new Error(stderr || error.message));
+                    else resolve(stdout);
+                });
+            });
+        };
+
+        const getCredToken = (): string | undefined => {
+            try {
+                const cwd = process.cwd();
+                const primaryPath = path.resolve(cwd, '.docker.credentials');
+                const fallbackPath = path.resolve(cwd, '..', '..', '.docker.credentials');
+                const credPath = existsSync(primaryPath) ? primaryPath : (existsSync(fallbackPath) ? fallbackPath : undefined);
+                if (!credPath) return undefined;
+                const raw = readFileSync(credPath, 'utf8');
+                const m = raw.match(/GITHUB_PAT\s*=\s*(.+)/);
+                return m ? m[1].trim() : undefined;
+            } catch {
+                return undefined;
+            }
+        };
+
+        const parseOwnerRepo = (): { owner?: string; repo?: string } => {
+            let owner: string | undefined;
+            let repo: string | undefined;
+            const url = (inputData as any).repositoryUrl as string | undefined;
+            if (url) {
+                if (url.includes('github.com/')) {
+                    const match = url.match(/github\.com\/([^\/]+)\/([^\/.]+)/);
+                    if (match) { owner = match[1]; repo = match[2]; }
+                } else if (url.includes('/') && !url.includes(' ')) {
+                    const parts = url.split('/');
+                    if (parts.length >= 2) { owner = parts[0]; repo = parts[1]; }
+                }
+            }
+            if (!owner || !repo) {
+                const ctxOwner = typeof context.owner === 'string' ? context.owner : undefined;
+                const ctxRepo = typeof context.repo === 'string' ? context.repo : undefined;
+                const fullName: string | undefined = typeof context.fullName === 'string' ? context.fullName : (typeof context.full_name === 'string' ? context.full_name : undefined);
+                if (ctxOwner && ctxRepo) { owner = ctxOwner; repo = ctxRepo; }
+                else if (fullName && fullName.includes('/')) { const [o, r] = fullName.split('/'); owner = o; repo = r; }
+            }
+            return { owner, repo };
+        };
+
+        const fetchGithubAbout = async (): Promise<{ about?: string; topics?: string[] }> => {
+            try {
+                const { owner, repo } = parseOwnerRepo();
+                if (!owner || !repo) return {};
+                const token = getCredToken();
+                const headers: any = { 'Accept': 'application/vnd.github+json' };
+                if (token) headers['Authorization'] = `Bearer ${token}`;
+                const res = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers });
+                if (!res.ok) return {};
+                const json: any = await res.json();
+                const topics = Array.isArray(json?.topics) ? json.topics : undefined;
+                return { about: typeof json?.description === 'string' ? json.description : undefined, topics };
+            } catch { return {}; }
+        };
+
+        const tryReadme = async (): Promise<string | undefined> => {
+            try {
+                const findCmd = `cd ${JSON.stringify(repoPath)} && for f in README README.md README.rst README.txt readme.md Readme.md; do if [ -f \"$f\" ]; then echo \"$f\"; break; fi; done`;
+                const p = (await sh(findCmd)).trim();
+                if (!p) return undefined;
+                const filePath = `${repoPath}/${p}`;
+                const content = await sh(`sed -n '1,200p' ${JSON.stringify(filePath)}`);
+                return content.trim();
+            } catch { return undefined; }
+        };
+
+        const tryPackageJson = async (): Promise<{ name?: string; description?: string; keywords?: string[] } | undefined> => {
+            try {
+                const pjPath = `${repoPath}/package.json`;
+                const exists = (await sh(`test -f ${JSON.stringify(pjPath)} && echo EXISTS || echo MISSING`)).trim();
+                if (exists !== 'EXISTS') return undefined;
+                const raw = await sh(`cat ${JSON.stringify(pjPath)}`);
+                const json = JSON.parse(raw);
+                return { name: json?.name, description: json?.description, keywords: Array.isArray(json?.keywords) ? json.keywords : undefined };
+            } catch { return undefined; }
+        };
+
+        const analyzeStructure = async (): Promise<{ languages: string[]; features: string[] }> => {
+            const features: string[] = [];
+            const languages: string[] = [];
+            try {
+                const filesOut = await sh(`cd ${JSON.stringify(repoPath)} && (git ls-files || find . -type f)`);
+                const lines = filesOut.split('\n').map(l => l.trim()).filter(Boolean);
+                const counts: Record<string, number> = {};
+                for (const lf of lines) {
+                    const name = lf.toLowerCase();
+                    if (name.includes('node_modules')) continue;
+                    const m = name.match(/\.([a-z0-9]+)$/);
+                    const ext = m ? m[1] : '';
+                    const map: Record<string, string> = {
+                        'ts': 'TypeScript', 'tsx': 'TypeScript', 'js': 'JavaScript', 'jsx': 'JavaScript',
+                        'py': 'Python', 'rb': 'Ruby', 'go': 'Go', 'rs': 'Rust', 'java': 'Java', 'kt': 'Kotlin',
+                        'c': 'C', 'cpp': 'C++', 'cc': 'C++', 'cxx': 'C++', 'hpp': 'C++', 'mm': 'Objective-C',
+                        'php': 'PHP', 'swift': 'Swift', 'm': 'Objective-C', 'scala': 'Scala',
+                        'html': 'HTML', 'css': 'CSS', 'scss': 'SCSS', 'sass': 'Sass', 'md': 'Markdown', 'sh': 'Shell'
+                    };
+                    const lang = map[ext];
+                    if (lang) counts[lang] = (counts[lang] || 0) + 1;
+                }
+                const sorted = Object.entries(counts).sort((a,b) => b[1]-a[1]).map(([k]) => k);
+                languages.push(...sorted.slice(0, 5));
+
+                const configs: Array<{ path: string; feat: string }> = [
+                    { path: `${repoPath}/Dockerfile`, feat: 'Dockerized' },
+                    { path: `${repoPath}/docker-compose.yml`, feat: 'Docker Compose' },
+                    { path: `${repoPath}/next.config.js`, feat: 'Next.js' },
+                    { path: `${repoPath}/tailwind.config.js`, feat: 'Tailwind CSS' },
+                    { path: `${repoPath}/vite.config.ts`, feat: 'Vite' },
+                    { path: `${repoPath}/jest.config.js`, feat: 'Jest' },
+                    { path: `${repoPath}/vitest.config.ts`, feat: 'Vitest' },
+                    { path: `${repoPath}/prisma/schema.prisma`, feat: 'Prisma' },
+                ];
+                for (const c of configs) {
+                    const ex = (await sh(`test -e ${JSON.stringify(c.path)} && echo EXISTS || echo MISSING`)).trim();
+                    if (ex === 'EXISTS') features.push(c.feat);
+                }
+            } catch {}
+            return { languages, features };
+        };
+
+        // 1) Try agent-driven description
+        let finalDescription: string | undefined;
+        try {
+            const aboutInfo = await fetchGithubAbout();
+            const agent = mastra?.getAgent?.("codebaseDescriptionAgent");
+            if (agent) {
+                const ownerRepo = parseOwnerRepo();
+                const hints = {
+                    owner: ownerRepo.owner || null,
+                    repo: ownerRepo.repo || null,
+                    githubAbout: aboutInfo.about || null,
+                    githubTopics: aboutInfo.topics || [],
+                };
+                const prompt = `You have access to docker_exec. containerId='${containerId}'. Repo path hint='${repoPath}'.
+Your task: produce a crisp 1-3 sentence description for this repository.
+Start by checking obvious sources (README, package manifests). Then, if needed, sample a few representative source files.
+Do not read more than 8 content files total. Keep outputs small using head and grep. Use only standard shell tools.
+Hints: ${JSON.stringify(hints)}.
+
+When done, return STRICT JSON only: {"description": string, "sources": string[], "confidence": number, "notes": string}.`;
+                const res: any = await agent.generate(prompt, { maxSteps: 12, maxRetries: 2 });
+                const text: string = (res?.text || "").toString();
+                let jsonText = text;
+                const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/```\s*([\s\S]*?)\s*```/);
+                if (jsonMatch) {
+                    jsonText = jsonMatch[1];
+                } else {
+                    const s = text.indexOf('{');
+                    const e = text.lastIndexOf('}');
+                    if (s !== -1 && e !== -1 && e > s) jsonText = text.substring(s, e + 1);
+                }
+                try {
+                    const parsed = JSON.parse(jsonText);
+                    if (parsed && typeof parsed.description === 'string' && parsed.description.trim().length > 0) {
+                        finalDescription = String(parsed.description).replace(/\s+/g, ' ').trim();
+                        logger?.info("🧠 Description agent success", {
+                            preview: finalDescription.substring(0, 140),
+                            confidence: parsed.confidence,
+                            sourcesCount: Array.isArray(parsed.sources) ? parsed.sources.length : 0,
+                            type: "AGENT_DESCRIPTION",
+                            runId,
+                        });
+                    }
+                } catch (e) {
+                    logger?.warn("⚠️ Agent JSON parse failed; will use fallback", { error: e instanceof Error ? e.message : String(e), type: "AGENT_DESCRIPTION", runId });
+                }
+            }
+        } catch (e) {
+            logger?.warn("⚠️ Agent invocation failed; will use fallback", { error: e instanceof Error ? e.message : String(e), type: "AGENT_DESCRIPTION", runId });
+        }
+
+        // 2) Fallback to static heuristics if needed
+        if (!finalDescription) {
+            const repoName = context.repo || context.name || (String(repoPath).split('/').pop() || 'repository');
+            const [aboutInfo, readmeContent, pkgInfo, structure] = await Promise.all([
+                fetchGithubAbout(),
+                tryReadme(),
+                tryPackageJson(),
+                analyzeStructure(),
+            ]);
+
+            const primary = aboutInfo.about || pkgInfo?.description || undefined;
+            let synthesized: string;
+            if (primary) {
+                synthesized = primary.trim();
+            } else if (readmeContent) {
+                const cleaned = readmeContent
+                    .split('\n')
+                    .filter(line => !/\!\[[^\]]*\]\([^)]*\)/.test(line))
+                    .join('\n');
+                const paras = cleaned.split(/\n\s*\n/).map(s => s.replace(/^#+\s*/,'').trim()).filter(Boolean);
+                synthesized = (paras[1] || paras[0] || `Repository ${repoName}`).slice(0, 600);
+            } else {
+                const langStr = (structure.languages || []).slice(0,3).join(', ');
+                const featStr = (structure.features || []).slice(0,3).join(', ');
+                const first = langStr ? `A ${langStr} codebase.` : `A software project.`;
+                const secondParts: string[] = [];
+                if (featStr) secondParts.push(`Includes ${featStr}.`);
+                if (aboutInfo.topics && aboutInfo.topics.length) secondParts.push(`Topics: ${aboutInfo.topics.slice(0,3).join(', ')}.`);
+                synthesized = `${first} ${secondParts.join(' ')}`.trim();
+            }
+            finalDescription = synthesized.replace(/\s+/g, ' ').trim();
+        }
+
+        const payload = { description: finalDescription };
 
         logger?.info("📨 Preparing to post project description", {
             step: "post-project-description",
@@ -310,7 +521,7 @@ export const postProjectDescriptionStep = createStep({
             projectId,
             hasContextData: !!inputData.contextData,
             contextKeys: Object.keys(context || {}),
-            descriptionPreview: description.substring(0, 120),
+            descriptionPreview: (finalDescription || '').substring(0, 120),
             type: "BACKEND_POST",
             runId,
         });
@@ -428,61 +639,222 @@ export const postProjectStackStep = createStep({
         const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
         const stackUrl = `${baseUrl}/api/projects/${projectId}/stack`;
 
-        // Basic tech stack detection from repo files (simple heuristics)
-        function normalizeName(name: string): string {
-            return name.toLowerCase().replace(/@/g, '').replace(/[^a-z0-9+\-.]/g, '');
-        }
+        // Enhanced detection using GitHub API + local file analysis and expanded icon mapping
+        const normalizeName = (name: string): string => name.toLowerCase().replace(/@/g, '').replace(/[^a-z0-9+\-.]/g, '');
 
         const stackMap: Record<string, { icon: string; title: string; description: string }> = {
-            "next": { icon: "nextjs", title: "Next.js", description: "React framework for hybrid rendering (SSR/SSG) and routing by Vercel." },
-            "nextjs": { icon: "nextjs", title: "Next.js", description: "React framework for hybrid rendering (SSR/SSG) and routing by Vercel." },
-            "react": { icon: "react", title: "React", description: "Component-based UI library for building interactive web interfaces." },
-            "typescript": { icon: "ts", title: "TypeScript", description: "Typed superset of JavaScript that compiles to plain JS." },
-            "javascript": { icon: "js", title: "JavaScript", description: "High-level, dynamic language for the web and Node.js." },
-            "node": { icon: "nodejs", title: "Node.js", description: "V8-based JavaScript runtime for server-side applications." },
-            "nodejs": { icon: "nodejs", title: "Node.js", description: "V8-based JavaScript runtime for server-side applications." },
-            "tailwind": { icon: "tailwind", title: "Tailwind CSS", description: "Utility-first CSS framework for rapid UI development." },
-            "vite": { icon: "vite", title: "Vite", description: "Next-gen frontend tooling with lightning-fast dev server and build." },
-            "vitest": { icon: "vitest", title: "Vitest", description: "Vite-native unit test framework with Jest-compatible API." },
-            "jest": { icon: "jest", title: "Jest", description: "Delightful JavaScript testing framework by Facebook." },
-            "prisma": { icon: "prisma", title: "Prisma", description: "Type-safe ORM for Node.js and TypeScript." },
-            "docker": { icon: "docker", title: "Docker", description: "Containerization platform for building and running applications." },
+            // Languages
+            'typescript': { icon: 'ts', title: 'TypeScript', description: 'Typed superset of JavaScript that compiles to plain JS.' },
+            'javascript': { icon: 'js', title: 'JavaScript', description: 'High-level, dynamic language for the web and Node.js.' },
+            'python': { icon: 'py', title: 'Python', description: 'Versatile language for scripting, data, and backend services.' },
+            'go': { icon: 'go', title: 'Go', description: 'Compiled language for fast, concurrent services by Google.' },
+            'rust': { icon: 'rust', title: 'Rust', description: 'Memory-safe systems programming language.' },
+            'java': { icon: 'java', title: 'Java', description: 'General-purpose language for enterprise applications.' },
+            'c++': { icon: 'cpp', title: 'C++', description: 'High-performance systems and application language.' },
+            'c': { icon: 'c', title: 'C', description: 'Low-level systems programming language.' },
+            'c#': { icon: 'cs', title: 'C#', description: 'Modern language for .NET platforms.' },
+            'php': { icon: 'php', title: 'PHP', description: 'Scripting language for server-side web development.' },
+            'ruby': { icon: 'ruby', title: 'Ruby', description: 'Dynamic language focused on simplicity and productivity.' },
+            'kotlin': { icon: 'kotlin', title: 'Kotlin', description: 'Modern JVM language by JetBrains.' },
+            'swift': { icon: 'swift', title: 'Swift', description: 'Apple’s language for iOS and macOS development.' },
+            'scala': { icon: 'scala', title: 'Scala', description: 'JVM language blending OOP and functional programming.' },
+            'shell': { icon: 'bash', title: 'Shell', description: 'Shell scripting for automation.' },
+            'html': { icon: 'html', title: 'HTML', description: 'Markup language for web pages.' },
+            'css': { icon: 'css', title: 'CSS', description: 'Stylesheet language for web pages.' },
+            'scss': { icon: 'sass', title: 'SCSS', description: 'Sass syntax for CSS with variables and nesting.' },
+            'sass': { icon: 'sass', title: 'Sass', description: 'CSS preprocessor with powerful features.' },
+
+            // JS frameworks/tools
+            'next': { icon: 'nextjs', title: 'Next.js', description: 'React framework for hybrid rendering (SSR/SSG) and routing by Vercel.' },
+            'nextjs': { icon: 'nextjs', title: 'Next.js', description: 'React framework for hybrid rendering (SSR/SSG) and routing by Vercel.' },
+            'react': { icon: 'react', title: 'React', description: 'Component-based UI library for building interactive interfaces.' },
+            'vue': { icon: 'vue', title: 'Vue.js', description: 'Progressive framework for building user interfaces.' },
+            'svelte': { icon: 'svelte', title: 'Svelte', description: 'Compiler-based UI framework for minimal runtime.' },
+            'vite': { icon: 'vite', title: 'Vite', description: 'Next-gen frontend tooling with fast dev server and build.' },
+            'vitest': { icon: 'vitest', title: 'Vitest', description: 'Vite-native unit test framework with Jest-compatible API.' },
+            'jest': { icon: 'jest', title: 'Jest', description: 'Delightful JavaScript testing framework.' },
+            'tailwind': { icon: 'tailwind', title: 'Tailwind CSS', description: 'Utility-first CSS framework for rapid UI development.' },
+            'express': { icon: 'express', title: 'Express', description: 'Minimal and flexible Node.js web application framework.' },
+            'nestjs': { icon: 'nestjs', title: 'NestJS', description: 'Progressive Node.js framework for scalable server-side apps.' },
+            'graphql': { icon: 'graphql', title: 'GraphQL', description: 'Query language for APIs and runtime for fulfilling queries.' },
+            'prisma': { icon: 'prisma', title: 'Prisma', description: 'Type-safe ORM for Node.js and TypeScript.' },
+            'sequelize': { icon: 'sequelize', title: 'Sequelize', description: 'Promise-based Node.js ORM for Postgres, MySQL, etc.' },
+            'redux': { icon: 'redux', title: 'Redux', description: 'Predictable state container for JavaScript apps.' },
+            'webpack': { icon: 'webpack', title: 'Webpack', description: 'Module bundler for JavaScript applications.' },
+            'rollup': { icon: 'rollupjs', title: 'Rollup', description: 'Module bundler for JavaScript libraries.' },
+            'eslint': { icon: 'js', title: 'ESLint', description: 'Pluggable linting utility for JavaScript and TypeScript.' },
+
+            // Python
+            'fastapi': { icon: 'fastapi', title: 'FastAPI', description: 'High performance Python web framework for APIs.' },
+            'flask': { icon: 'flask', title: 'Flask', description: 'Lightweight WSGI web application framework.' },
+            'django': { icon: 'django', title: 'Django', description: 'High-level Python web framework.' },
+            'pytorch': { icon: 'pytorch', title: 'PyTorch', description: 'Deep learning framework.' },
+            'tensorflow': { icon: 'tensorflow', title: 'TensorFlow', description: 'End-to-end open source platform for machine learning.' },
+            'sklearn': { icon: 'sklearn', title: 'Scikit-learn', description: 'Machine learning in Python.' },
+
+            // Infra / DB / Messaging
+            'docker': { icon: 'docker', title: 'Docker', description: 'Containerization platform.' },
+            'kubernetes': { icon: 'kubernetes', title: 'Kubernetes', description: 'Container orchestration system.' },
+            'terraform': { icon: 'terraform', title: 'Terraform', description: 'Infrastructure as code tool.' },
+            'postgres': { icon: 'postgres', title: 'PostgreSQL', description: 'Advanced open source relational database.' },
+            'sqlite': { icon: 'sqlite', title: 'SQLite', description: 'Serverless SQL database engine.' },
+            'mongodb': { icon: 'mongodb', title: 'MongoDB', description: 'NoSQL document database.' },
+            'redis': { icon: 'redis', title: 'Redis', description: 'In-memory data store for caching and messaging.' },
+            'rabbitmq': { icon: 'rabbitmq', title: 'RabbitMQ', description: 'Message broker for distributed systems.' },
+            'elasticsearch': { icon: 'elasticsearch', title: 'Elasticsearch', description: 'Search and analytics engine.' },
+            'nginx': { icon: 'nginx', title: 'Nginx', description: 'High performance HTTP and reverse proxy server.' },
         };
 
-        function mapToStackItem(name: string): { title: string; description: string; icon: string } | null {
+        const mapToStackItem = (name: string): { title: string; description: string; icon: string } | null => {
             const n = normalizeName(name);
             const direct = stackMap[n];
             if (direct) return { title: direct.title, description: direct.description, icon: direct.icon };
-            if (/^next(\.|$)/.test(n)) return { title: "Next.js", description: stackMap["next"].description, icon: "nextjs" };
-            if (/^react(\.|$)/.test(n)) return { title: "React", description: stackMap["react"].description, icon: "react" };
-            if (n.includes("typescript") || n === "ts") return { title: "TypeScript", description: stackMap["typescript"].description, icon: "ts" };
-            if (n.includes("node")) return { title: "Node.js", description: stackMap["node"].description, icon: "nodejs" };
+            if (/^next(\.|$)/.test(n)) return { title: 'Next.js', description: stackMap['next'].description, icon: 'nextjs' };
+            if (/^react(\.|$)/.test(n)) return { title: 'React', description: stackMap['react'].description, icon: 'react' };
+            if (n.includes('typescript') || n === 'ts') return { title: 'TypeScript', description: stackMap['typescript'].description, icon: 'ts' };
+            if (n.includes('javascript') || n === 'js') return { title: 'JavaScript', description: stackMap['javascript'].description, icon: 'js' };
+            if (n.includes('node')) return { title: 'Node.js', description: 'V8-based JavaScript runtime for server-side applications.', icon: 'nodejs' };
             return null;
-        }
+        };
 
-        // Basic detection from repo name and context
-        const candidateNames: string[] = ['javascript', 'node'];
-        const repoName = (context.repo || context.name || '').toLowerCase();
-        if (repoName.includes('next')) candidateNames.push('nextjs');
-        if (repoName.includes('react')) candidateNames.push('react');
-        if (repoName.includes('typescript') || repoName.includes('-ts-')) candidateNames.push('typescript');
+        const { containerId, repoPath } = (inputData as any);
+
+        const getCredToken = (): string | undefined => {
+            try {
+                const cwd = process.cwd();
+                const primaryPath = path.resolve(cwd, '.docker.credentials');
+                const fallbackPath = path.resolve(cwd, '..', '..', '.docker.credentials');
+                const credPath = existsSync(primaryPath) ? primaryPath : (existsSync(fallbackPath) ? fallbackPath : undefined);
+                if (!credPath) return undefined;
+                const raw = readFileSync(credPath, 'utf8');
+                const m = raw.match(/GITHUB_PAT\s*=\s*(.+)/);
+                return m ? m[1].trim() : undefined;
+            } catch { return undefined; }
+        };
+
+        const parseOwnerRepo = (): { owner?: string; repo?: string } => {
+            let owner: string | undefined;
+            let repo: string | undefined;
+            const url = (inputData as any).repositoryUrl as string | undefined;
+            if (url) {
+                if (url.includes('github.com/')) {
+                    const match = url.match(/github\.com\/([^\/]+)\/([^\/.]+)/);
+                    if (match) { owner = match[1]; repo = match[2]; }
+                } else if (url.includes('/') && !url.includes(' ')) {
+                    const parts = url.split('/');
+                    if (parts.length >= 2) { owner = parts[0]; repo = parts[1]; }
+                }
+            }
+            if (!owner || !repo) {
+                const ctxOwner = typeof context.owner === 'string' ? context.owner : undefined;
+                const ctxRepo = typeof context.repo === 'string' ? context.repo : undefined;
+                const fullName: string | undefined = typeof context.fullName === 'string' ? context.fullName : (typeof context.full_name === 'string' ? context.full_name : undefined);
+                if (ctxOwner && ctxRepo) { owner = ctxOwner; repo = ctxRepo; }
+                else if (fullName && fullName.includes('/')) {
+                    const [o, r] = fullName.split('/'); owner = o; repo = r;
+                }
+            }
+            return { owner, repo };
+        };
+
+        const fetchGithubLanguages = async (): Promise<Array<{ title: string; icon: string; description: string }>> => {
+            try {
+                const { owner, repo } = parseOwnerRepo();
+                if (!owner || !repo) return [];
+                const token = getCredToken();
+                const headers: any = { 'Accept': 'application/vnd.github+json' };
+                if (token) headers['Authorization'] = `Bearer ${token}`;
+                const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/languages`, { headers });
+                if (!res.ok) return [];
+                const json = await res.json() as Record<string, number>;
+                const sorted = Object.entries(json).sort((a,b) => b[1]-a[1]).map(([k]) => k);
+                const mapped: Array<{ title: string; icon: string; description: string }> = [];
+                for (const lang of sorted.slice(0, 8)) {
+                    const item = mapToStackItem(lang.toLowerCase());
+                    if (item) mapped.push(item);
+                    else {
+                        const lower = lang.toLowerCase();
+                        const fallback = stackMap[lower];
+                        if (fallback) mapped.push({ title: fallback.title, description: fallback.description, icon: fallback.icon });
+                    }
+                }
+                return mapped;
+            } catch { return []; }
+        };
+
+        const sh = (cmd: string): Promise<string> => new Promise((resolve, reject) => {
+            exec(`docker exec ${containerId} bash -lc ${JSON.stringify(cmd)}`, (error, stdout, stderr) => {
+                if (error) reject(new Error(stderr || error.message)); else resolve(stdout);
+            });
+        });
+
+        const analyzeLocal = async (): Promise<Array<{ title: string; icon: string; description: string }>> => {
+            const items: Array<{ title: string; icon: string; description: string }> = [];
+            // Languages via extensions
+            try {
+                const filesOut = await sh(`cd ${JSON.stringify(repoPath)} && (git ls-files || find . -type f)`);
+                const lines = filesOut.split('\n').map(l => l.trim()).filter(Boolean);
+                const counts: Record<string, number> = {};
+                for (const lf of lines) {
+                    const name = lf.toLowerCase();
+                    if (name.includes('node_modules')) continue;
+                    const m = name.match(/\.([a-z0-9]+)$/);
+                    const ext = m ? m[1] : '';
+                    const map: Record<string, string> = {
+                        'ts': 'typescript', 'tsx': 'typescript', 'js': 'javascript', 'jsx': 'javascript',
+                        'py': 'python', 'rb': 'ruby', 'go': 'go', 'rs': 'rust', 'java': 'java', 'kt': 'kotlin',
+                        'c': 'c', 'cpp': 'c++', 'cc': 'c++', 'cxx': 'c++', 'hpp': 'c++',
+                        'php': 'php', 'swift': 'swift', 'scala': 'scala', 'sh': 'shell', 'css': 'css', 'scss': 'scss', 'html': 'html'
+                    };
+                    const lang = map[ext]; if (lang) counts[lang] = (counts[lang] || 0) + 1;
+                }
+                const langs = Object.entries(counts).sort((a,b) => b[1]-a[1]).map(([k]) => k).slice(0, 5);
+                for (const l of langs) { const it = mapToStackItem(l); if (it) items.push(it); }
+            } catch {}
+            // JS libraries via package.json
+            try {
+                const pjPath = `${repoPath}/package.json`;
+                const exists = (await sh(`test -f ${JSON.stringify(pjPath)} && echo EXISTS || echo MISSING`)).trim();
+                if (exists === 'EXISTS') {
+                    const raw = await sh(`cat ${JSON.stringify(pjPath)}`);
+                    const pkg = JSON.parse(raw);
+                    const deps = Object.keys({ ...(pkg.dependencies||{}), ...(pkg.devDependencies||{}) });
+                    const candidates = deps.map((d: string) => normalizeName(d));
+                    for (const c of candidates) { const it = mapToStackItem(c); if (it) items.push(it); }
+                }
+            } catch {}
+            // Python via requirements.txt
+            try {
+                const reqPath = `${repoPath}/requirements.txt`;
+                const exists = (await sh(`test -f ${JSON.stringify(reqPath)} && echo EXISTS || echo MISSING`)).trim();
+                if (exists === 'EXISTS') {
+                    const raw = await sh(`cat ${JSON.stringify(reqPath)}`);
+                    const pkgs = raw.split(/\r?\n/).map(l => l.trim().split('==')[0]).filter(Boolean);
+                    for (const p of pkgs) { const it = mapToStackItem(p); if (it) items.push(it); }
+                }
+            } catch {}
+            // Docker presence
+            try {
+                const dockerfile = (await sh(`test -f ${JSON.stringify(repoPath + '/Dockerfile')} && echo EXISTS || echo MISSING`)).trim();
+                if (dockerfile === 'EXISTS') items.push(stackMap['docker']);
+            } catch {}
+            return items;
+        };
+
+        const fromGithub = await fetchGithubLanguages();
+        const fromLocal = await analyzeLocal();
 
         const seen = new Set<string>();
-        const techStack = candidateNames
-            .map(mapToStackItem)
-            .filter((v): v is { title: string; description: string; icon: string } => !!v)
-            .filter(item => {
-                const key = item.title.toLowerCase();
-                if (seen.has(key)) return false;
-                seen.add(key);
-                return true;
-            });
+        const techStack = [...fromGithub, ...fromLocal].filter(it => {
+            const key = it.title.toLowerCase();
+            if (seen.has(key)) return false; seen.add(key); return true;
+        }).slice(0, 20);
 
         logger?.info("📨 Preparing to post project stack", {
             step: "post-project-stack",
             url: stackUrl,
             projectId,
-            candidateCount: candidateNames.length,
+            candidateCount: fromGithub.length + fromLocal.length,
             techStackCount: techStack.length,
             techStackSample: techStack.slice(0, 5),
             type: "BACKEND_POST",
@@ -587,8 +959,8 @@ export const postProjectStackStep = createStep({
     },
 });
 
-export const saveContextStep = createStep({
-    id: "save-context-step",
+export const dockerSaveContextStep = createStep({
+    id: "docker-save-context-step",
     inputSchema: z.object({
         "post-project-description-step": z.object({
             result: z.string(),
@@ -823,4 +1195,4 @@ export const testDockerWorkflow = createWorkflow({
         contextPath: z.string().describe("Path where context was saved in the container"),
         repoPath: z.string().describe("Absolute path to the cloned repository inside the container"),
     }),
-}).then(testDockerStep).then(testDockerGithubCloneStep).parallel([postProjectDescriptionStep, postProjectStackStep]).then(saveContextStep).commit();
+}).then(testDockerStep).then(testDockerGithubCloneStep).parallel([postProjectDescriptionStep, postProjectStackStep]).then(dockerSaveContextStep).commit();
